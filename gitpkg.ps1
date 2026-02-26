@@ -278,7 +278,8 @@ function Update-OnePackage([string]$Id) {
   if (-not (Test-GitRepo -Dir $dir)) { throw "Not a git repo for '${Id}': $dir" }
   Write-Info "Updating $Id..."
   $before = (Invoke-Git -GitArgs @('rev-parse', 'HEAD') -WorkingDir $dir).Stdout.Trim()
-  Invoke-Git -GitArgs @('pull', '--ff-only') -WorkingDir $dir | Out-Null
+  & git -C $dir pull --ff-only
+  if ($LASTEXITCODE -ne 0) { throw "git pull failed for '$Id' (exit $LASTEXITCODE)." }
   $after  = (Invoke-Git -GitArgs @('rev-parse', 'HEAD') -WorkingDir $dir).Stdout.Trim()
   if ($before -ne $after) { 'updated' } else { 'latest' }
 }
@@ -318,12 +319,11 @@ function Update-GitpkgPackage([string]$Target) {
 
   if ($Target -ieq 'all') {
     if ($ids.Count -eq 0) { Write-Info 'No packages installed.'; return }
-    $results = foreach ($id in $ids) {
-      try   { $status = Update-OnePackage -Id $id; [PSCustomObject]@{ Package=$id; Result=$status; Error='' } }
-      catch { [PSCustomObject]@{ Package=$id; Result='failed'; Error=$_.Exception.Message } }
+    $failCount = 0
+    foreach ($id in $ids) {
+      try   { Update-OnePackage -Id $id | Out-Null }
+      catch { $failCount++; Write-Err "Failed [$id]: $($_.Exception.Message)" }
     }
-    $results | Format-Table -AutoSize
-    $failCount = @($results | Where-Object { $_.Result -eq 'failed' }).Count
     if ($failCount -gt 0) { throw "Update finished with $failCount failure(s)." }
     return
   }
