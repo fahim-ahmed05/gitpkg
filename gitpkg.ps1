@@ -273,11 +273,14 @@ function Update-OnePackage([string]$Id) {
   if (-not (Test-Path -LiteralPath $dir)) {
     Write-Warn "Directory missing for '$Id'; re-cloning."
     Invoke-Git -GitArgs @('clone', $p.url, $dir) | Out-Null
-    return
+    return 'updated'
   }
   if (-not (Test-GitRepo -Dir $dir)) { throw "Not a git repo for '${Id}': $dir" }
-  Write-Info "Updating $Id"
+  Write-Info "Updating $Id..."
+  $before = (Invoke-Git -GitArgs @('rev-parse', 'HEAD') -WorkingDir $dir).Stdout.Trim()
   Invoke-Git -GitArgs @('pull', '--ff-only') -WorkingDir $dir | Out-Null
+  $after  = (Invoke-Git -GitArgs @('rev-parse', 'HEAD') -WorkingDir $dir).Stdout.Trim()
+  if ($before -ne $after) { 'updated' } else { 'latest' }
 }
 
 function Get-PackageUpdateStatus([string]$Id, [object]$Manifest, [string]$RepoRoot) {
@@ -316,7 +319,7 @@ function Update-GitpkgPackage([string]$Target) {
   if ($Target -ieq 'all') {
     if ($ids.Count -eq 0) { Write-Info 'No packages installed.'; return }
     $results = foreach ($id in $ids) {
-      try   { Update-OnePackage -Id $id; [PSCustomObject]@{ Package=$id; Result='updated'; Error='' } }
+      try   { $status = Update-OnePackage -Id $id; [PSCustomObject]@{ Package=$id; Result=$status; Error='' } }
       catch { [PSCustomObject]@{ Package=$id; Result='failed'; Error=$_.Exception.Message } }
     }
     $results | Format-Table -AutoSize
@@ -326,8 +329,8 @@ function Update-GitpkgPackage([string]$Target) {
   }
 
   $id = (ConvertTo-PackageSpec -Spec $Target).Id
-  Update-OnePackage -Id $id
-  Write-Info "Updated: $id"
+  $status = Update-OnePackage -Id $id
+  if ($status -eq 'updated') { Write-Info "Updated: $id" } else { Write-Info "Already latest: $id" }
 }
 
 function Remove-GitpkgPackage([string]$Spec, [switch]$KeepFiles) {
