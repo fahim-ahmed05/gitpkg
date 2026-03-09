@@ -403,7 +403,7 @@ try {
     'get'    { Get-GitpkgPackage }
     'add'    { Add-GitpkgPackage    -Spec $Arg1 }
     'update' { Update-GitpkgPackage -Target $Arg1 }
-    'remove' { Remove-GitpkgPackage -Spec $Arg1 -KeepFiles:$KeepFiles }
+    'remove' - 'rm' { Remove-GitpkgPackage -Spec $Arg1 -KeepFiles:$KeepFiles }
     'export' { Export-GitpkgPackage -OutPath $Arg1 }
     'import' { Import-GitpkgPackage -InPath $Arg1 }
     default  {
