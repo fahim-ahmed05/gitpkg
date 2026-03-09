@@ -5,7 +5,7 @@ Repos root:    ~/gitpkgs
 Manifest:      ~/.config/gitpkg/manifest.json
 
 Commands:
-  Add     <spec>           Install (clone) a repo package
+  Add     <spec>           Install (clone) a repo package  (or: gitpkg <spec>)
   Update  [spec|all]       Check for updates (no arg), or update one / all
   Remove  <spec> [-KeepFiles]
   Get                      List installed packages
@@ -189,7 +189,7 @@ Roots:
   Manifest:  ~/.config/gitpkg/manifest.json
 
 Commands:
-  Add     <spec>           Install (clone) a repo package
+  Add     <spec>           Install (clone) a repo package  (or: gitpkg <spec>)
   Update  [spec|all]       No arg: show update status table
                            spec:   update one package
                            all:    update all packages
@@ -207,6 +207,7 @@ Specs:
   git@host:user/repo(.git)
 
 Examples:
+  .\gitpkg.ps1 BurntSushi/ripgrep
   .\gitpkg.ps1 Add    BurntSushi/ripgrep
   .\gitpkg.ps1 Update
   .\gitpkg.ps1 Update all
@@ -405,7 +406,11 @@ try {
     'remove' { Remove-GitpkgPackage -Spec $Arg1 -KeepFiles:$KeepFiles }
     'export' { Export-GitpkgPackage -OutPath $Arg1 }
     'import' { Import-GitpkgPackage -InPath $Arg1 }
-    default  { throw "Unknown command '$Command'. Run '.\gitpkg.ps1 Help' for usage." }
+    default  {
+      # Treat bare specs (user/repo, host:user/repo, URLs, git@ URLs) as implicit Add
+      try   { Add-GitpkgPackage -Spec $Command }
+      catch { throw "Unknown command '$Command'. Run '.\gitpkg.ps1 Help' for usage." }
+    }
   }
 } catch {
   Write-Err $_.Exception.Message
