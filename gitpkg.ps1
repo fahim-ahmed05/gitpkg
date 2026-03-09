@@ -409,7 +409,7 @@ try {
     default  {
       # Treat bare specs (user/repo, host:user/repo, URLs, git@ URLs) as implicit Add
       try   { Add-GitpkgPackage -Spec $Command }
-      catch { throw "Unknown command '$Command'. Run '.\gitpkg.ps1 Help' for usage." }
+      catch { throw "Unknown command '$Command'. Run '.\gitpkg.ps1 help' for usage." }
     }
   }
 } catch {
