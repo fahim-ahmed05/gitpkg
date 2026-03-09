@@ -5,13 +5,13 @@ Repos root:    ~/gitpkgs
 Manifest:      ~/.config/gitpkg/manifest.json
 
 Commands:
-  Add     <spec>           Install (clone) a repo package  (or: gitpkg <spec>)
-  Update  [spec|all]       Check for updates (no arg), or update one / all
-  Remove  <spec> [-KeepFiles]
-  Get                      List installed packages
-  Export  [path]           Export package list to JSON (or stdout)
-  Import  <path>           Install all packages from an export file
-  Help
+  add     <spec>           Clone a repo  (or: gitpkg <spec>)
+  update  [spec|all]       Check for updates (no arg), or update "user/repo" / all
+  rm  <spec> [-keep]       Remove a repo, optionally keeping files on disk
+  get                      List cloned repos
+  export  [path]           Export repo list to JSON (or stdout)
+  import  <path>           Clone all repos from an export file
+  help
 
 Specs accepted:
   user/repo                     => github.com:user/repo
@@ -403,7 +403,6 @@ try {
     'get'    { Get-GitpkgPackage }
     'add'    { Add-GitpkgPackage    -Spec $Arg1 }
     'update' { Update-GitpkgPackage -Target $Arg1 }
-    'remove' { Remove-GitpkgPackage -Spec $Arg1 -KeepFiles:$KeepFiles }
     'rm'     { Remove-GitpkgPackage -Spec $Arg1 -KeepFiles:$KeepFiles }
     'export' { Export-GitpkgPackage -OutPath $Arg1 }
     'import' { Import-GitpkgPackage -InPath $Arg1 }
