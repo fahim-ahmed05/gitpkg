@@ -161,7 +161,7 @@ switch ($Command) {
             }
         }
 
-        Write-Host "Checking remote servers for changes... " -ForegroundColor Cyan
+        Write-Host "Checking remote servers for updates... " -ForegroundColor Cyan
         $StatusList = @()
         foreach ($pkg in $TargetPackages) {
             $skipMsg = if ($pkg.Frozen) { " (Frozen)" } else { "" }
@@ -174,7 +174,6 @@ switch ($Command) {
                         $statusMsg = "Frozen$skipMsg"
                     }
                     else {
-                        # Git output is now visible
                         $localHash = & git rev-parse HEAD
                         $remoteOutput = & git ls-remote $pkg.Url "refs/heads/$($pkg.Branch)"
                         if ($remoteOutput) {
@@ -244,8 +243,15 @@ switch ($Command) {
                 Push-Location $pkg.Path
                 $hashBefore = & git rev-parse HEAD
 
-                if ($pkg.Depth -eq 1) { & git fetch origin $pkg.Branch --depth 1 }
-                else { & git fetch --unshallow; & git fetch origin $pkg.Branch }
+                if ($pkg.Depth -eq 1) { 
+                    & git fetch origin $pkg.Branch --depth 1 
+                }
+                else {
+                    if ((& git rev-parse --is-shallow-repository 2>$null) -eq 'true') { 
+                        & git fetch --unshallow 
+                    }
+                    & git fetch origin $pkg.Branch
+                }
                 & git reset --hard origin/$($pkg.Branch)
 
                 $hashAfter = & git rev-parse HEAD
