@@ -143,7 +143,7 @@ function ConvertTo-PackageSpec([string]$Spec) {
 
   if ($s -match '^(?<host>[^:\s]+):(?<path>[^/\s@]+(?:/[^/\s@]+)+)(?:@(?<branch>[^\s]+))?$') {
     $rh = $Matches.host; $path = Format-PathPart $Matches.path
-    if ($Matches.PSObject.Properties['branch'] -and $Matches.branch) { $branch = $Matches.branch }
+    if ($Matches['branch']) { $branch = $Matches['branch'] }
     return [PSCustomObject]@{ Id="${rh}:${path}@${branch}"; Url="https://$rh/$path.git"; Host=$rh; Path=$path; Branch=$branch; Display="$path@$branch" }
   }
 
@@ -173,7 +173,7 @@ function ConvertTo-PackageSpec([string]$Spec) {
 
   if ($s -match '^(?<user>[^@\s]+)@(?<host>[^:\s]+):(?<path>[^/\s@]+(?:/[^/\s@]+)+?)(?:@(?<branch>[^\s]+))?(\.git)?$') {
     $rh = $Matches.host; $path = Format-PathPart $Matches.path
-    if ($Matches.PSObject.Properties['branch'] -and $Matches.branch) { $branch = $Matches.branch }
+    if ($Matches['branch']) { $branch = $Matches['branch'] }
     return [PSCustomObject]@{ Id="${rh}:${path}@${branch}"; Url=$s; Host=$rh; Path=$path; Branch=$branch; Display="$path@$branch" }
   }
 
