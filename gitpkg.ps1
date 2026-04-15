@@ -22,7 +22,7 @@ if (-not (Test-Path $ConfigDir)) { New-Item -ItemType Directory -Path $ConfigDir
 if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir | Out-Null }
 if (-not (Test-Path $ConfigFile)) { Set-Content -Path $ConfigFile -Value "[]" }
 
---- HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS ---
 
 function Get-Packages {
     $content = Get-Content $ConfigFile -Raw
@@ -82,7 +82,7 @@ function Resolve-AmbiguousPackage {
     }
 }
 
---- MAIN LOGIC ---
+# --- MAIN LOGIC ---
 
 switch ($Command) {
     'clone' {
@@ -170,7 +170,8 @@ switch ($Command) {
                     try {
                         if ($pkg.Frozen) {
                             $statusMsg = "Frozen$skipMsg"
-                        } else {
+                        }
+                        else {
                             $localHash = & git rev-parse HEAD 2>$null
                             $remoteOutput = & git ls-remote $pkg.Url "refs/heads/$($pkg.Branch)" 2>$null
                             if ($remoteOutput) {
@@ -245,7 +246,8 @@ switch ($Command) {
 
                 if ($pkg.Depth -eq 1) {
                     & git fetch origin $pkg.Branch --depth 1 --quiet
-                } else {
+                }
+                else {
                     & git fetch --unshallow --quiet 2>$null
                     & git fetch origin $pkg.Branch --quiet
                 }
@@ -327,7 +329,7 @@ switch ($Command) {
             if (-not $existingIds -or $existingIds -notcontains $pkg.Id) {
                 # Explicitly set defaults on import if missing
                 if ($null -eq $pkg.Frozen) { $pkg | Add-Member -NotePropertyName Frozen -NotePropertyValue $false -Force }
-                if ($null -eq $pkg.Depth)   { $pkg | Add-Member -NotePropertyName Depth   -NotePropertyValue 1 -Force }
+                if ($null -eq $pkg.Depth) { $pkg | Add-Member -NotePropertyName Depth   -NotePropertyValue 1 -Force }
                 $currentPackages += $pkg
                 $addedCount++
             }
