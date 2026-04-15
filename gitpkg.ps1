@@ -22,24 +22,22 @@ if (-not (Test-Path $ConfigDir)) { New-Item -ItemType Directory -Path $ConfigDir
 if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir | Out-Null }
 if (-not (Test-Path $ConfigFile)) { Set-Content -Path $ConfigFile -Value "[]" }
 
-# --- HELPER FUNCTIONS ---
+--- HELPER FUNCTIONS ---
 
 function Get-Packages {
     $content = Get-Content $ConfigFile -Raw
     if ([string]::IsNullOrWhiteSpace($content) -or $content -eq '[]') { return @() }
-    $pkgs = @($content | ConvertFrom-Json)
-    
-    foreach ($pkg in $pkgs) {
-        if ($null -eq $pkg.Frozen) { $pkg | Add-Member -NotePropertyName Frozen -NotePropertyValue $false -Force }
-        if ($null -eq $pkg.Depth) { $pkg | Add-Member -NotePropertyName Depth   -NotePropertyValue 1 -Force }
-    }
-    return $pkgs
+    return @($content | ConvertFrom-Json)
 }
 
 function Save-Packages {
     param([array]$Packages)
-    if ($Packages.Count -eq 0) { Set-Content -Path $ConfigFile -Value "[]" }
-    else { $Packages | ConvertTo-Json -Depth 2 | Set-Content -Path $ConfigFile }
+    if ($Packages.Count -eq 0) {
+        Set-Content -Path $ConfigFile -Value "[]"
+    }
+    else {
+        $Packages | ConvertTo-Json -Depth 2 | Set-Content -Path $ConfigFile
+    }
 }
 
 function Get-ShortHash {
@@ -63,26 +61,35 @@ function Get-RemoteDefaultBranch {
 
 function Resolve-AmbiguousPackage {
     param(
-        [array]$AmbiguousPackages,
+        [array]$Candidates,
         [string]$TargetName,
         [string]$ActionName
     )
     Write-Host "`nMultiple repositories match '$TargetName'. Which one would you like to $ActionName?" -ForegroundColor Yellow
-    for ($i = 0; $i -lt $AmbiguousPackages.Count; $i++) { Write-Host " [$($i + 1)] $($AmbiguousPackages[$i].Id)" }
+    for ($i = 0; $i -lt $Candidates.Count; $i++) { Write-Host " [$($i + 1)] $($Candidates[$i].Id)" }
     Write-Host " [0] Cancel`n"
     $choice = Read-Host "Enter number"
-    if ($choice -eq '0') { Write-Host "Operation cancelled." -ForegroundColor Yellow; exit 0 }
-    elseif ($choice -match '^\d+$' -and [int]$choice -gt 0 -and [int]$choice -le $AmbiguousPackages.Count) {
-        return @($AmbiguousPackages[[int]$choice - 1])
+    if ($choice -eq '0') {
+        Write-Host "Operation cancelled." -ForegroundColor Yellow
+        exit 0
     }
-    else { Write-Host "Invalid choice. Exiting." -ForegroundColor Red; exit 1 }
+    elseif ($choice -match '^\d+$' -and [int]$choice -gt 0 -and [int]$choice -le $Candidates.Count) {
+        return @($Candidates[[int]$choice - 1])
+    }
+    else {
+        Write-Host "Invalid choice. Exiting." -ForegroundColor Red
+        exit 1
+    }
 }
 
-# --- MAIN LOGIC ---
+--- MAIN LOGIC ---
 
 switch ($Command) {
     'clone' {
-        if (-not $Target) { Write-Host "Error: URL required for clone. Usage: gitpkg clone <url> [branch]" -ForegroundColor Red; exit 1 }
+        if (-not $Target) {
+            Write-Host "Error: URL required for clone. Usage: gitpkg clone <url> [branch]" -ForegroundColor Red
+            exit 1
+        }
         $CleanTarget = $Target.TrimEnd('/')
         if (-not $Name) { $Name = ($CleanTarget -split '[:/]')[-1] -replace '\.git$', '' }
 
@@ -93,121 +100,204 @@ switch ($Command) {
         }
 
         if ($CleanTarget -match '^(?:https?://|ssh://)?(?:git@)?([^/:]+)[/:](.+?)(?:\.git)?$') {
-            $Domain = $matches[1]; $RepoPath = $matches[2]
+            $Domain = $matches[1]
+            $RepoPath = $matches[2]
         }
-        else { Write-Host "Error: Could not parse URL properly." -ForegroundColor Red; exit 1 }
+        else {
+            Write-Host "Error: Could not parse URL properly." -ForegroundColor Red
+            exit 1
+        }
 
         $FormattedId = "{0}:{1}@{2}" -f $Domain, $RepoPath, $Branch
         $ShortHash = Get-ShortHash -InputString $FormattedId
         $DirName = "{0}@{1}-{2}" -f $Name, $Branch, $ShortHash
 
         [array]$Packages = Get-Packages
-        if ($Packages.Id -contains $FormattedId) { Write-Host "Repository '$FormattedId' is already cloned and tracked." -ForegroundColor Yellow; exit 0 }
+        if ($Packages.Id -contains $FormattedId) { 
+            Write-Host "Repository '$FormattedId' is already cloned and tracked." -ForegroundColor Yellow
+            exit 0 
+        }
 
         $TargetPath = Join-Path $InstallDir $DirName
-        if (Test-Path $TargetPath) { Write-Host "Error: Directory '$DirName' exists but is untracked. Remove-Item -Recurse -Force `"$TargetPath`"" -ForegroundColor Yellow; exit 1 }
+        if (Test-Path $TargetPath) {
+            Write-Host "Error: Directory '$DirName' exists but is untracked." -ForegroundColor Red
+            Write-Host "Clean it up: Remove-Item -Recurse -Force `"$TargetPath`"" -ForegroundColor Yellow
+            exit 1
+        }
 
         $gitArgs = @("clone", "--depth", "1", $CleanTarget, $TargetPath, "--branch", $Branch)
         Write-Host "== > Cloning $FormattedId... " -ForegroundColor Cyan
         & git @gitArgs
 
         if ($LASTEXITCODE -eq 0) {
-            $newPkg = [PSCustomObject]@{ Id = $FormattedId; Name = $Name; Hash = $ShortHash; Url = $CleanTarget; Branch = $Branch; Path = $TargetPath; Frozen = $false; Depth = 1 }
+            # Explicitly set defaults on creation
+            $newPkg = [PSCustomObject]@{
+                Id     = $FormattedId
+                Name   = $Name
+                Hash   = $ShortHash
+                Url    = $CleanTarget
+                Branch = $Branch
+                Path   = $TargetPath
+                Frozen = $false
+                Depth  = 1
+            }
             $Packages += $newPkg
             Save-Packages $Packages
             Write-Host "Successfully cloned to '$DirName'." -ForegroundColor Green
         }
-        else { Write-Host "Failed to clone '$Name'. Check network or SSH keys." -ForegroundColor Red }
+        else {
+            Write-Host "Failed to clone '$Name'. Check network or SSH keys." -ForegroundColor Red
+        }
     }
 
     'pull' {
         [array]$Packages = Get-Packages
-        if ($Packages.Count -eq 0) { Write-Host "No repositories tracked." -ForegroundColor Yellow; exit 0 }
+        if ($Packages.Count -eq 0) {
+            Write-Host "No repositories tracked." -ForegroundColor Yellow
+            exit 0
+        }
 
         if (-not $Target) {
             Write-Host "Checking remote servers for updates... " -ForegroundColor Cyan
             $StatusList = @()
+
             foreach ($pkg in $Packages) {
                 $skipMsg = if ($pkg.Frozen) { " (Frozen)" } else { "" }
                 if (Test-Path $pkg.Path) {
                     Push-Location $pkg.Path
-                    $isBehind = $false; $statusMsg = "Up to date$skipMsg"
+                    $isBehind = $false
+                    $statusMsg = "Up to date$skipMsg"
                     try {
-                        if ($pkg.Frozen) { $statusMsg = "Frozen$skipMsg" }
-                        else {
+                        if ($pkg.Frozen) {
+                            $statusMsg = "Frozen$skipMsg"
+                        } else {
                             $localHash = & git rev-parse HEAD 2>$null
                             $remoteOutput = & git ls-remote $pkg.Url "refs/heads/$($pkg.Branch)" 2>$null
                             if ($remoteOutput) {
                                 $remoteHash = ($remoteOutput -split '\s+')[0]
-                                if ($localHash -and $remoteHash -and ($localHash -ne $remoteHash)) { $isBehind = $true; $statusMsg = "Update available$skipMsg" }
+                                if ($localHash -and $remoteHash -and ($localHash -ne $remoteHash)) {
+                                    $isBehind = $true
+                                    $statusMsg = "Update available$skipMsg"
+                                }
                             }
                             else { $statusMsg = "Error reaching remote$skipMsg" }
                         }
                     }
                     catch { $statusMsg = "Error checking status$skipMsg" }
-                    $StatusList += [PSCustomObject]@{ Name = $pkg.Name; Status = $statusMsg; Id = $pkg.Id; NeedsAction = $isBehind -and (-not $pkg.Frozen) }
+
+                    $StatusList += [PSCustomObject]@{
+                        Name        = $pkg.Name
+                        Status      = $statusMsg
+                        Id          = $pkg.Id
+                        NeedsAction = $isBehind -and (-not $pkg.Frozen)
+                    }
                     Pop-Location
                 }
                 else {
-                    $StatusList += [PSCustomObject]@{ Name = $pkg.Name; Status = "Missing (Will restore)$skipMsg"; Id = $pkg.Id; NeedsAction = $true -and (-not $pkg.Frozen) }
+                    $StatusList += [PSCustomObject]@{
+                        Name        = $pkg.Name
+                        Status      = "Missing (Will restore)$skipMsg"
+                        Id          = $pkg.Id
+                        NeedsAction = $true -and (-not $pkg.Frozen)
+                    }
                 }
             }
-            Write-Host "`nRepository Status: "; $StatusList | Format-Table Name, Status, Id -AutoSize
-            $actions = $StatusList | Where-Object { $_.NeedsAction }
-            if ($actions.Count -gt 0) { Write-Host "$($actions.Count) repositories need updates or restoration.`nRun 'gitpkg pull all' to apply them." -ForegroundColor Green }
-            else { Write-Host "All repositories are up to date and present.`n" -ForegroundColor Green }
+
+            Write-Host "`nRepository Status: "
+            $StatusList | Format-Table Name, Status, Id -AutoSize
+
+            $actionsAvailable = $StatusList | Where-Object { $_.NeedsAction -eq $true }
+            if ($actionsAvailable.Count -gt 0) {
+                Write-Host "$($actionsAvailable.Count) repositories need updates or restoration." -ForegroundColor Green
+                Write-Host "Run 'gitpkg pull all' to apply them, or 'gitpkg pull <name>' for a specific one.`n"
+            }
+            else {
+                Write-Host "All repositories are up to date and present.`n" -ForegroundColor Green
+            }
             exit 0
         }
 
         [array]$MatchedPackages = @()
-        if ($Target -eq "all") { $MatchedPackages = $Packages }
+        if ($Target -eq "all") {
+            $MatchedPackages = $Packages
+        }
         else {
             $MatchedPackages = $Packages | Where-Object { $_.Name -eq $Target -or $_.Id -eq $Target -or $_.Hash -eq $Target }
-            if ($MatchedPackages.Count -eq 0) { Write-Host "Repository '$Target' not found." -ForegroundColor Yellow; exit 1 }
+            if ($MatchedPackages.Count -eq 0) {
+                Write-Host "Repository '$Target' not found." -ForegroundColor Yellow
+                exit 1
+            }
             if ($MatchedPackages.Count -gt 1 -and $Target -eq $MatchedPackages[0].Name) {
-                $MatchedPackages = Resolve-AmbiguousPackage -AmbiguousPackages $MatchedPackages -TargetName $Target -ActionName "pull"
+                $MatchedPackages = Resolve-AmbiguousPackage -Candidates $MatchedPackages -TargetName $Target -ActionName "pull"
             }
         }
 
         foreach ($pkg in $MatchedPackages) {
-            if ($pkg.Frozen) { Write-Host "==> Skipping frozen repository $($pkg.Id)..." -ForegroundColor Yellow; continue }
-            
+            if ($pkg.Frozen) {
+                Write-Host "==> Skipping frozen repository $($pkg.Id)..." -ForegroundColor Yellow
+                continue
+            }
+
             if (Test-Path $pkg.Path) {
                 Write-Host "== > Pulling $($pkg.Id)... " -ForegroundColor Cyan
                 Push-Location $pkg.Path
                 $hashBefore = & git rev-parse HEAD 2>$null
-                if ($pkg.Depth -eq 1) { & git fetch origin $pkg.Branch --depth 1 --quiet }
-                else { & git fetch --unshallow --quiet 2>$null; & git fetch origin $pkg.Branch --quiet }
+
+                if ($pkg.Depth -eq 1) {
+                    & git fetch origin $pkg.Branch --depth 1 --quiet
+                } else {
+                    & git fetch --unshallow --quiet 2>$null
+                    & git fetch origin $pkg.Branch --quiet
+                }
                 & git reset --hard origin/$($pkg.Branch) --quiet
+
                 $hashAfter = & git rev-parse HEAD 2>$null
-                if ($hashBefore -and $hashAfter -and ($hashBefore -ne $hashAfter)) { Write-Host "    -> Updated!" -ForegroundColor Green }
-                else { Write-Host "    -> Already up to date." -ForegroundColor DarkGray }
+                if ($hashBefore -and $hashAfter -and ($hashBefore -ne $hashAfter)) {
+                    Write-Host "    -> Updated!" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "    -> Already up to date." -ForegroundColor DarkGray
+                }
                 Pop-Location
             }
             else {
                 Write-Host "== > Restoring missing repository $($pkg.Id)... " -ForegroundColor Magenta
-                $gitArgs = if ($pkg.Depth -eq 1) { @("clone", "--depth", "1", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch, "--quiet") }
-                else { @("clone", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch, "--quiet") }
+                $gitArgs = @("clone", "--depth", "1", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch, "--quiet")
+                if ($pkg.Depth -ne 1) { $gitArgs = @("clone", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch, "--quiet") }
                 & git @gitArgs
             }
         }
-        if ($Target -eq "all") { Write-Host "All repositories processed." -ForegroundColor Green } else { Write-Host "Successfully processed." -ForegroundColor Green }
+
+        if ($Target -eq "all") { Write-Host "All repositories processed." -ForegroundColor Green }
+        else { Write-Host "Successfully processed." -ForegroundColor Green }
     }
 
     'list' {
         [array]$Packages = Get-Packages
-        if ($Packages.Count -gt 0) { $Packages | Format-Table Name, Branch, Hash, Id, Frozen, Depth -AutoSize }
-        else { Write-Host "No repositories tracked." -ForegroundColor Yellow }
+        if ($Packages.Count -gt 0) {
+            $Packages | Format-Table Name, Branch, Hash, Id, Frozen, Depth -AutoSize
+        }
+        else {
+            Write-Host "No repositories tracked." -ForegroundColor Yellow
+        }
     }
 
     'rm' {
-        if (-not $Target) { Write-Host "Error: Target required. Usage: gitpkg rm <name|id|hash>" -ForegroundColor Red; exit 1 }
+        if (-not $Target) {
+            Write-Host "Error: Target required. Usage: gitpkg rm <name|id|hash>" -ForegroundColor Red
+            exit 1
+        }
         [array]$Packages = Get-Packages
         [array]$MatchedPackages = $Packages | Where-Object { $_.Name -eq $Target -or $_.Id -eq $Target -or $_.Hash -eq $Target }
-        if ($MatchedPackages.Count -eq 0) { Write-Host "Repository '$Target' not found." -ForegroundColor Yellow; exit 1 }
-        if ($MatchedPackages.Count -gt 1 -and $Target -eq $MatchedPackages[0].Name) {
-            $MatchedPackages = Resolve-AmbiguousPackage -AmbiguousPackages $MatchedPackages -TargetName $Target -ActionName "remove"
+
+        if ($MatchedPackages.Count -eq 0) {
+            Write-Host "Repository '$Target' not found." -ForegroundColor Yellow
+            exit 1
         }
+        if ($MatchedPackages.Count -gt 1 -and $Target -eq $MatchedPackages[0].Name) {
+            $MatchedPackages = Resolve-AmbiguousPackage -Candidates $MatchedPackages -TargetName $Target -ActionName "remove"
+        }
+
         $TargetPkg = $MatchedPackages[0]
         Write-Host "==> Removing $($TargetPkg.Id)..." -ForegroundColor Cyan
         if (Test-Path $TargetPkg.Path) { Remove-Item -Path $TargetPkg.Path -Recurse -Force }
@@ -219,32 +309,44 @@ switch ($Command) {
     'export' {
         $exportPath = if ($Target) { $Target } else { Join-Path (Get-Location) "gitpkg-export.json" }
         Copy-Item -Path $ConfigFile -Destination $exportPath -Force
-        Write-Host "Successfully exported tracked repositories to:" -ForegroundColor Green; Write-Host $exportPath -ForegroundColor Cyan
+        Write-Host "Successfully exported tracked repositories to:" -ForegroundColor Green
+        Write-Host $exportPath -ForegroundColor Cyan
     }
 
     'import' {
-        if (-not $Target -or -not (Test-Path $Target)) { Write-Host "Error: Please provide a valid path to a JSON file. Usage: gitpkg import <file.json>" -ForegroundColor Red; exit 1 }
+        if (-not $Target -or -not (Test-Path $Target)) {
+            Write-Host "Error: Please provide a valid path to a JSON file. Usage: gitpkg import <file.json>" -ForegroundColor Red
+            exit 1
+        }
         $importedData = Get-Content $Target -Raw | ConvertFrom-Json
         [array]$currentPackages = Get-Packages
-        $addedCount = 0; $existingIds = $currentPackages.Id
+        $addedCount = 0
+        $existingIds = $currentPackages | Select-Object -ExpandProperty Id
+
         foreach ($pkg in $importedData) {
             if (-not $existingIds -or $existingIds -notcontains $pkg.Id) {
+                # Explicitly set defaults on import if missing
                 if ($null -eq $pkg.Frozen) { $pkg | Add-Member -NotePropertyName Frozen -NotePropertyValue $false -Force }
-                if ($null -eq $pkg.Depth) { $pkg | Add-Member -NotePropertyName Depth   -NotePropertyValue 1 -Force }
-                $currentPackages += $pkg; $addedCount++
+                if ($null -eq $pkg.Depth)   { $pkg | Add-Member -NotePropertyName Depth   -NotePropertyValue 1 -Force }
+                $currentPackages += $pkg
+                $addedCount++
             }
         }
+
         Save-Packages $currentPackages
         Write-Host "Imported $addedCount new repositories from $Target." -ForegroundColor Green
-        if ($addedCount -gt 0) { Write-Host "Run 'gitpkg pull all' to physically download the missing directories." -ForegroundColor Yellow }
+        if ($addedCount -gt 0) {
+            Write-Host "Run 'gitpkg pull all' to physically download the missing directories." -ForegroundColor Yellow
+        }
     }
 
     'freeze' {
-        if (-not $Target) { Write-Host "Error: Target required." -ForegroundColor Red; exit 1 }
+        if (-not $Target) { Write-Host "Error: Target required. Usage: gitpkg freeze <name|id|hash>" -ForegroundColor Red; exit 1 }
         [array]$Packages = Get-Packages
         [array]$Matched = $Packages | Where-Object { $_.Name -eq $Target -or $_.Id -eq $Target -or $_.Hash -eq $Target }
         if ($Matched.Count -eq 0) { Write-Host "Repository '$Target' not found." -ForegroundColor Yellow; exit 1 }
-        if ($Matched.Count -gt 1 -and $Target -eq $Matched[0].Name) { $Matched = Resolve-AmbiguousPackage -AmbiguousPackages $Matched -TargetName $Target -ActionName "freeze" }
+        if ($Matched.Count -gt 1 -and $Target -eq $Matched[0].Name) { $Matched = Resolve-AmbiguousPackage -Candidates $Matched -TargetName $Target -ActionName "freeze" }
+        
         $idx = [array]::IndexOf($Packages, $Matched[0])
         $Packages[$idx].Frozen = $true
         Save-Packages $Packages
@@ -252,11 +354,12 @@ switch ($Command) {
     }
 
     'unfreeze' {
-        if (-not $Target) { Write-Host "Error: Target required." -ForegroundColor Red; exit 1 }
+        if (-not $Target) { Write-Host "Error: Target required. Usage: gitpkg unfreeze <name|id|hash>" -ForegroundColor Red; exit 1 }
         [array]$Packages = Get-Packages
         [array]$Matched = $Packages | Where-Object { $_.Name -eq $Target -or $_.Id -eq $Target -or $_.Hash -eq $Target }
         if ($Matched.Count -eq 0) { Write-Host "Repository '$Target' not found." -ForegroundColor Yellow; exit 1 }
-        if ($Matched.Count -gt 1 -and $Target -eq $Matched[0].Name) { $Matched = Resolve-AmbiguousPackage -AmbiguousPackages $Matched -TargetName $Target -ActionName "unfreeze" }
+        if ($Matched.Count -gt 1 -and $Target -eq $Matched[0].Name) { $Matched = Resolve-AmbiguousPackage -Candidates $Matched -TargetName $Target -ActionName "unfreeze" }
+        
         $idx = [array]::IndexOf($Packages, $Matched[0])
         $Packages[$idx].Frozen = $false
         Save-Packages $Packages
@@ -264,11 +367,12 @@ switch ($Command) {
     }
 
     'deep' {
-        if (-not $Target) { Write-Host "Error: Target required." -ForegroundColor Red; exit 1 }
+        if (-not $Target) { Write-Host "Error: Target required. Usage: gitpkg deep <name|id|hash>" -ForegroundColor Red; exit 1 }
         [array]$Packages = Get-Packages
         [array]$Matched = $Packages | Where-Object { $_.Name -eq $Target -or $_.Id -eq $Target -or $_.Hash -eq $Target }
         if ($Matched.Count -eq 0) { Write-Host "Repository '$Target' not found." -ForegroundColor Yellow; exit 1 }
-        if ($Matched.Count -gt 1 -and $Target -eq $Matched[0].Name) { $Matched = Resolve-AmbiguousPackage -AmbiguousPackages $Matched -TargetName $Target -ActionName "set deep fetch" }
+        if ($Matched.Count -gt 1 -and $Target -eq $Matched[0].Name) { $Matched = Resolve-AmbiguousPackage -Candidates $Matched -TargetName $Target -ActionName "set deep fetch" }
+        
         $idx = [array]::IndexOf($Packages, $Matched[0])
         $Packages[$idx].Depth = 0
         Save-Packages $Packages
@@ -276,11 +380,12 @@ switch ($Command) {
     }
 
     'shallow' {
-        if (-not $Target) { Write-Host "Error: Target required." -ForegroundColor Red; exit 1 }
+        if (-not $Target) { Write-Host "Error: Target required. Usage: gitpkg shallow <name|id|hash>" -ForegroundColor Red; exit 1 }
         [array]$Packages = Get-Packages
         [array]$Matched = $Packages | Where-Object { $_.Name -eq $Target -or $_.Id -eq $Target -or $_.Hash -eq $Target }
         if ($Matched.Count -eq 0) { Write-Host "Repository '$Target' not found." -ForegroundColor Yellow; exit 1 }
-        if ($Matched.Count -gt 1 -and $Target -eq $Matched[0].Name) { $Matched = Resolve-AmbiguousPackage -AmbiguousPackages $Matched -TargetName $Target -ActionName "set shallow fetch" }
+        if ($Matched.Count -gt 1 -and $Target -eq $Matched[0].Name) { $Matched = Resolve-AmbiguousPackage -Candidates $Matched -TargetName $Target -ActionName "set shallow fetch" }
+        
         $idx = [array]::IndexOf($Packages, $Matched[0])
         $Packages[$idx].Depth = 1
         Save-Packages $Packages
