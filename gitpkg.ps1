@@ -122,7 +122,9 @@ function Format-SafeFsName([string]$s) {
 }
 
 function Get-DirName([string]$Id, [string]$Branch = 'main') {
-  Format-SafeFsName ($Id.Replace(':', '_').Replace('/', '_') + "_$Branch")
+  # Use ~ as separator; it's not allowed in git repo/user names or domain names
+  # Don't use Format-SafeFsName as it converts ~ to _
+  $id.Replace(':', '~').Replace('/', '~') + "~$Branch"
 }
 
 function Format-PathPart([string]$p) {
