@@ -242,15 +242,15 @@ Roots:
   Manifest:  ~/.config/gitpkg/manifest.json
 
 Commands:
-  Clone   <spec>           Install (clone) a repo package  (or: gitpkg <spec>)
-  Pull    [spec|all]       No arg: show update status table
+  clone   <spec>           Install (clone) a repo package  (or: gitpkg <spec>)
+  pull    [spec|all]       No arg: show update status table
                            spec:   update one package
                            all:    update all packages
   rm      <spec>           Uninstall a package
           [-KeepFiles]     Remove from manifest only, keep files on disk
-  List                     List installed packages
-  Export  [path]           Export package list to JSON (stdout if no path)
-  Import  <path>           Install all packages from an export file
+  list                     List installed packages
+  export  [path]           Export package list to JSON (stdout if no path)
+  import  <path>           Install all packages from an export file
   Help                     Show this help
 
 Specs:
@@ -260,17 +260,17 @@ Specs:
   git@host:namespace/.../repo(.git)
 
 Examples:
-  .\gitpkg.ps1 Clone  github.com:BurntSushi/ripgrep
-  .\gitpkg.ps1 Clone  gitlab.com:group/subgroup/tool
-  .\gitpkg.ps1 Clone  https://codeberg.org/org/subgroup/repo.git
-  .\gitpkg.ps1 Clone  ssh://git@gitlab.com/group/subgroup/repo.git
-  .\gitpkg.ps1 Pull
-  .\gitpkg.ps1 Pull all
-  .\gitpkg.ps1 Pull github.com:BurntSushi/ripgrep
+  .\gitpkg.ps1 clone  github.com:BurntSushi/ripgrep
+  .\gitpkg.ps1 clone  gitlab.com:group/subgroup/tool
+  .\gitpkg.ps1 clone  https://codeberg.org/org/subgroup/repo.git
+  .\gitpkg.ps1 clone  ssh://git@gitlab.com/group/subgroup/repo.git
+  .\gitpkg.ps1 pull
+  .\gitpkg.ps1 pull all
+  .\gitpkg.ps1 pull github.com:BurntSushi/ripgrep
   .\gitpkg.ps1 rm    github.com:BurntSushi/ripgrep
-  .\gitpkg.ps1 List
-  .\gitpkg.ps1 Export .\gitpkg.json
-  .\gitpkg.ps1 Import .\gitpkg.json
+  .\gitpkg.ps1 list
+  .\gitpkg.ps1 export .\gitpkg.json
+  .\gitpkg.ps1 import .\gitpkg.json
 "@ | Write-Host
 }
 
