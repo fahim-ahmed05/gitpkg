@@ -19,10 +19,10 @@ Flags:
   -NoParallelStatus             Force sequential status checks for "pull" with no target
 
 Specs accepted:
-  host:namespace/repo                     => https://host/namespace/repo.git
-  https://host/namespace/.../repo(.git)
-  ssh://user@host/namespace/.../repo(.git)
-  git@host:namespace/.../repo(.git)
+  host:namespace/repo[@branch]                     => https://host/namespace/repo.git (defaults to main if branch omitted)
+  https://host/namespace/.../repo(.git)[@branch]
+  ssh://user@host/namespace/.../repo(.git)[@branch]
+  git@host:namespace/.../repo(.git)[@branch]
 #>
 
 [CmdletBinding()]
@@ -121,8 +121,8 @@ function Format-SafeFsName([string]$s) {
   $clean
 }
 
-function Get-DirName([string]$Id) {
-  Format-SafeFsName ($Id.Replace(':', '__').Replace('/', '__'))
+function Get-DirName([string]$Id, [string]$Branch = 'main') {
+  Format-SafeFsName ($Id.Replace(':', '@').Replace('/', '@') + "@$Branch")
 }
 
 function Format-PathPart([string]$p) {
@@ -139,10 +139,12 @@ function Test-RepoPath([string]$Path) {
 function ConvertTo-PackageSpec([string]$Spec) {
   if ([string]::IsNullOrWhiteSpace($Spec)) { throw 'Missing repo spec.' }
   $s = $Spec.Trim()
+  $branch = 'main'
 
-  if ($s -match '^(?<host>[^:\s]+):(?<path>[^/\s]+(?:/[^/\s]+)+)$') {
+  if ($s -match '^(?<host>[^:\s]+):(?<path>[^/\s@]+(?:/[^/\s@]+)+)(?:@(?<branch>[^\s]+))?$') {
     $rh = $Matches.host; $path = Format-PathPart $Matches.path
-    return [PSCustomObject]@{ Id="${rh}:$path"; Url="https://$rh/$path.git"; Host=$rh; Path=$path; Display=$path }
+    if ($Matches.PSObject.Properties['branch'] -and $Matches.branch) { $branch = $Matches.branch }
+    return [PSCustomObject]@{ Id="${rh}:${path}@${branch}"; Url="https://$rh/$path.git"; Host=$rh; Path=$path; Branch=$branch; Display="$path@$branch" }
   }
 
   if ($s -match '^https?://') {
@@ -150,7 +152,7 @@ function ConvertTo-PackageSpec([string]$Spec) {
       $u = [Uri]$s; $rh = $u.Host; $path = Format-PathPart $u.AbsolutePath
       if (-not (Test-RepoPath $path)) { throw "URL path must be namespace/repo with at least two segments (got '$path')." }
       $url = if (-not $s.EndsWith('.git', [System.StringComparison]::OrdinalIgnoreCase)) { "$($u.Scheme)://$rh/$path.git" } else { $s }
-      return [PSCustomObject]@{ Id="${rh}:$path"; Url=$url; Host=$rh; Path=$path; Display=$path }
+      return [PSCustomObject]@{ Id="${rh}:${path}@${branch}"; Url=$url; Host=$rh; Path=$path; Branch=$branch; Display="$path@$branch" }
     } catch [System.UriFormatException] { throw "Malformed URL: $s" }
   }
 
@@ -165,16 +167,17 @@ function ConvertTo-PackageSpec([string]$Spec) {
       $portPart = if ($u.IsDefaultPort) { '' } else { ":$($u.Port)" }
       $url = "ssh://$user@$rh$portPart/$path.git"
       $hostForId = "$rh$portPart"
-      return [PSCustomObject]@{ Id="${hostForId}:$path"; Url=$url; Host=$hostForId; Path=$path; Display=$path }
+      return [PSCustomObject]@{ Id="${hostForId}:${path}@${branch}"; Url=$url; Host=$hostForId; Path=$path; Branch=$branch; Display="$path@$branch" }
     } catch [System.UriFormatException] { throw "Malformed SSH URL: $s" }
   }
 
-  if ($s -match '^(?<user>[^@\s]+)@(?<host>[^:\s]+):(?<path>[^/\s]+(?:/[^/\s]+)+?)(\.git)?$') {
+  if ($s -match '^(?<user>[^@\s]+)@(?<host>[^:\s]+):(?<path>[^/\s@]+(?:/[^/\s@]+)+?)(?:@(?<branch>[^\s]+))?(\.git)?$') {
     $rh = $Matches.host; $path = Format-PathPart $Matches.path
-    return [PSCustomObject]@{ Id="${rh}:$path"; Url=$s; Host=$rh; Path=$path; Display=$path }
+    if ($Matches.PSObject.Properties['branch'] -and $Matches.branch) { $branch = $Matches.branch }
+    return [PSCustomObject]@{ Id="${rh}:${path}@${branch}"; Url=$s; Host=$rh; Path=$path; Branch=$branch; Display="$path@$branch" }
   }
 
-  throw "Unrecognised spec '$Spec'. Use: host:namespace/repo | https://host/namespace/repo(.git) | ssh://user@host/namespace/repo(.git) | git@host:namespace/repo(.git)"
+  throw "Unrecognised spec '$Spec'. Use: host:namespace/repo[@branch] | https://host/namespace/repo(.git)[@branch] | ssh://user@host/namespace/repo(.git)[@branch] | git@host:namespace/repo(.git)[@branch]"
 }
 
 function New-EmptyManifest {
@@ -214,6 +217,10 @@ function Import-Manifest {
       $pkg | Add-Member -NotePropertyName display -NotePropertyValue $prop.Name -Force
     } else {
       $pkg.display = $prop.Name
+    }
+
+    if (-not $pkg.PSObject.Properties['branch']) {
+      $pkg | Add-Member -NotePropertyName branch -NotePropertyValue 'main' -Force
     }
   }
 
@@ -265,16 +272,17 @@ Flags:
   -NoParallelStatus             Disable parallel status checks for "pull" with no target
 
 Specs:
-  host:namespace/repo
-  https://host/namespace/.../repo(.git)
-  ssh://user@host/namespace/.../repo(.git)
-  git@host:namespace/.../repo(.git)
+  host:namespace/repo[@branch]
+  https://host/namespace/.../repo(.git)[@branch]
+  ssh://user@host/namespace/.../repo(.git)[@branch]
+  git@host:namespace/.../repo(.git)[@branch]
 
 Examples:
   .\gitpkg.ps1 clone  github.com:BurntSushi/ripgrep
+  .\gitpkg.ps1 clone  github.com:BurntSushi/ripgrep@develop
   .\gitpkg.ps1 clone  gitlab.com:group/subgroup/tool
   .\gitpkg.ps1 clone  https://codeberg.org/org/subgroup/repo.git
-  .\gitpkg.ps1 clone  ssh://git@gitlab.com/group/subgroup/repo.git
+  .\gitpkg.ps1 clone  ssh://git@gitlab.com/group/subgroup/repo.git@stable
   .\gitpkg.ps1 pull
   .\gitpkg.ps1 pull all
   .\gitpkg.ps1 pull github.com:BurntSushi/ripgrep
@@ -295,10 +303,12 @@ function Get-GitpkgPackage {
   $rows = foreach ($id in $ids) {
     $p   = Get-PackageEntry $m $id
     $dir = Get-PackageDir -RepoRoot $repoRoot -DirName $p.dir
+    $branch = if ($p | Get-Member branch) { $p.branch } else { 'main' }
     [PSCustomObject]@{
       Package = if ($p.id) { $p.id } else { $id }
       Status  = (Test-Path -LiteralPath $dir) ? 'ok' : 'missing'
       URL     = $p.url
+      Branch  = $branch
     }
   }
   $rows | Format-Table -AutoSize
@@ -308,11 +318,11 @@ function Add-GitpkgPackage([string]$Spec, [object]$Manifest = $null, [switch]$Sk
   if ([string]::IsNullOrWhiteSpace($Spec)) { throw 'Clone requires a repo spec.' }
   $repoRoot = Get-RepoRoot; Ensure-Dir $repoRoot
   $m = if ($null -ne $Manifest) { $Manifest } else { Import-Manifest }
-  $pkg = ConvertTo-PackageSpec -Spec $Spec; $id = $pkg.Id
+  $pkg = ConvertTo-PackageSpec -Spec $Spec; $id = $pkg.Id; $branch = $pkg.Branch
 
   if (Get-PackageEntry $m $id) { Write-Warn "Already installed: $id"; return }
 
-  $dirName = Get-DirName -Id $id
+  $dirName = Get-DirName -Id "$($pkg.Host):$($pkg.Path)" -Branch $branch
   $dirPath = Get-PackageDir -RepoRoot $repoRoot -DirName $dirName
 
   if (Test-Path -LiteralPath $dirPath) {
@@ -324,12 +334,12 @@ function Add-GitpkgPackage([string]$Spec, [object]$Manifest = $null, [switch]$Sk
       } catch { }
     } else { throw "Target path exists but is not a git repo: $dirPath" }
   } else {
-    Write-Info "Cloning $($pkg.Url) -> $dirPath"
-    Invoke-Git -GitArgs @('clone', $pkg.Url, $dirPath) | Out-Null
+    Write-Info "Cloning $($pkg.Url) -> $dirPath (branch: $branch)"
+    Invoke-Git -GitArgs @('clone', '--branch', $branch, $pkg.Url, $dirPath) | Out-Null
   }
 
   $m.packages | Add-Member -NotePropertyName $id -NotePropertyValue ([PSCustomObject]@{
-    id = $id; display = $id; url = $pkg.Url
+    id = $id; display = $id; url = $pkg.Url; branch = $branch
     dir = $dirName; installed = (Get-Date -Format 'o')
   }) -Force
   if (-not $SkipSave) { Export-Manifest $m }
@@ -342,11 +352,12 @@ function Update-OnePackage([string]$Id, [object]$Manifest = $null, [string]$Repo
   if (-not $p) { throw "Package not found in manifest: $Id" }
   $repoRoot = if ([string]::IsNullOrWhiteSpace($RepoRoot)) { Get-RepoRoot } else { $RepoRoot }
   Ensure-Dir $repoRoot
+  $branch = if ($p | Get-Member branch) { $p.branch } else { 'main' }
   $dir = Get-PackageDir -RepoRoot $repoRoot -DirName $p.dir
 
   if (-not (Test-Path -LiteralPath $dir)) {
     Write-Warn "Directory missing for '$Id'; re-cloning."
-    Invoke-Git -GitArgs @('clone', $p.url, $dir) | Out-Null
+    Invoke-Git -GitArgs @('clone', '--branch', $branch, $p.url, $dir) | Out-Null
     return 'updated'
   }
   if (-not (Test-GitRepo -Dir $dir)) { throw "Not a git repo for '${Id}': $dir" }
