@@ -6,7 +6,7 @@ Manifest:      ~/.config/gitpkg/manifest.json
 
 Commands:
   clone   <spec>           Clone a repo  (or: gitpkg <spec>)
-  pull    [spec|all]       Check for updates (no arg), or update "user/repo" / all
+  pull    [spec|all]       Check for updates (no arg), or update "spec" / all
   rm  <spec> [-keep]       Remove a repo, optionally keeping files on disk
   list                     List cloned repos
   export  [path]           Export repo list to JSON (or stdout)
@@ -14,10 +14,10 @@ Commands:
   help
 
 Specs accepted:
-  user/repo                     => github.com:user/repo
-  host:user/repo                => host:user/repo
-  https://host/user/repo(.git)
-  git@host:user/repo(.git)
+  host:namespace/repo                     => https://host/namespace/repo.git
+  https://host/namespace/.../repo(.git)
+  ssh://user@host/namespace/.../repo(.git)
+  git@host:namespace/.../repo(.git)
 #>
 
 [CmdletBinding()]
@@ -29,7 +29,12 @@ param(
   [string]$Arg1,
 
   [switch]$KeepFiles,
-  [switch]$Quiet
+  [switch]$Quiet,
+
+  [ValidateRange(1, 32)]
+  [int]$StatusCheckThrottle = 6,
+
+  [switch]$NoParallelStatus
 )
 
 Set-StrictMode -Version Latest
@@ -121,35 +126,50 @@ function Format-PathPart([string]$p) {
   $t
 }
 
+function Test-RepoPath([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+  ($Path -match '^[^/\s]+(?:/[^/\s]+)+$')
+}
+
 function ConvertTo-PackageSpec([string]$Spec) {
   if ([string]::IsNullOrWhiteSpace($Spec)) { throw 'Missing repo spec.' }
   $s = $Spec.Trim()
 
-  if ($s -match '^(?<host>[^:\s]+):(?<path>[^/\s]+/[^/\s]+)$') {
+  if ($s -match '^(?<host>[^:\s]+):(?<path>[^/\s]+(?:/[^/\s]+)+)$') {
     $rh = $Matches.host; $path = Format-PathPart $Matches.path
-    return [PSCustomObject]@{ Id="${rh}:$path"; Url="https://$rh/$path.git"; Host=$rh; Path=$path; Display=$path }
-  }
-
-  if ($s -match '^(?<user>[^/\s@:]+)/(?<repo>[^/\s]+)$') {
-    $rh = 'github.com'; $path = Format-PathPart $s
     return [PSCustomObject]@{ Id="${rh}:$path"; Url="https://$rh/$path.git"; Host=$rh; Path=$path; Display=$path }
   }
 
   if ($s -match '^https?://') {
     try {
       $u = [Uri]$s; $rh = $u.Host; $path = Format-PathPart $u.AbsolutePath
-      if ($path -notmatch '^[^/]+/[^/]+$') { throw "URL path must be owner/repo (got '$path')." }
-      $url = if (-not $s.EndsWith('.git', [System.StringComparison]::OrdinalIgnoreCase)) { "https://$rh/$path.git" } else { $s }
+      if (-not (Test-RepoPath $path)) { throw "URL path must be namespace/repo with at least two segments (got '$path')." }
+      $url = if (-not $s.EndsWith('.git', [System.StringComparison]::OrdinalIgnoreCase)) { "$($u.Scheme)://$rh/$path.git" } else { $s }
       return [PSCustomObject]@{ Id="${rh}:$path"; Url=$url; Host=$rh; Path=$path; Display=$path }
     } catch [System.UriFormatException] { throw "Malformed URL: $s" }
   }
 
-  if ($s -match '^(?<user>[^@\s]+)@(?<host>[^:\s]+):(?<path>[^/\s]+/[^/\s]+?)(\.git)?$') {
+  if ($s -match '^ssh://') {
+    try {
+      $u = [Uri]$s
+      if ($u.Scheme -ne 'ssh') { throw "Unsupported URL scheme '$($u.Scheme)'." }
+      $rh = $u.Host
+      $path = Format-PathPart $u.AbsolutePath
+      if (-not (Test-RepoPath $path)) { throw "URL path must be namespace/repo with at least two segments (got '$path')." }
+      $user = if ([string]::IsNullOrWhiteSpace($u.UserInfo)) { 'git' } else { $u.UserInfo }
+      $portPart = if ($u.IsDefaultPort) { '' } else { ":$($u.Port)" }
+      $url = "ssh://$user@$rh$portPart/$path.git"
+      $hostForId = "$rh$portPart"
+      return [PSCustomObject]@{ Id="${hostForId}:$path"; Url=$url; Host=$hostForId; Path=$path; Display=$path }
+    } catch [System.UriFormatException] { throw "Malformed SSH URL: $s" }
+  }
+
+  if ($s -match '^(?<user>[^@\s]+)@(?<host>[^:\s]+):(?<path>[^/\s]+(?:/[^/\s]+)+?)(\.git)?$') {
     $rh = $Matches.host; $path = Format-PathPart $Matches.path
     return [PSCustomObject]@{ Id="${rh}:$path"; Url=$s; Host=$rh; Path=$path; Display=$path }
   }
 
-  throw "Unrecognised spec '$Spec'. Use: user/repo | host:user/repo | https://... | git@host:..."
+  throw "Unrecognised spec '$Spec'. Use: host:namespace/repo | https://host/namespace/repo(.git) | ssh://user@host/namespace/repo(.git) | git@host:namespace/repo(.git)"
 }
 
 function New-EmptyManifest {
@@ -208,7 +228,7 @@ Commands:
   Pull    [spec|all]       No arg: show update status table
                            spec:   update one package
                            all:    update all packages
-  Remove  <spec>           Uninstall a package
+  rm      <spec>           Uninstall a package
           [-KeepFiles]     Remove from manifest only, keep files on disk
   List                     List installed packages
   Export  [path]           Export package list to JSON (stdout if no path)
@@ -216,18 +236,20 @@ Commands:
   Help                     Show this help
 
 Specs:
-  user/repo
-  host:user/repo
-  https://host/user/repo(.git)
-  git@host:user/repo(.git)
+  host:namespace/repo
+  https://host/namespace/.../repo(.git)
+  ssh://user@host/namespace/.../repo(.git)
+  git@host:namespace/.../repo(.git)
 
 Examples:
-  .\gitpkg.ps1 BurntSushi/ripgrep
-  .\gitpkg.ps1 Clone  BurntSushi/ripgrep
+  .\gitpkg.ps1 Clone  github.com:BurntSushi/ripgrep
+  .\gitpkg.ps1 Clone  gitlab.com:group/subgroup/tool
+  .\gitpkg.ps1 Clone  https://codeberg.org/org/subgroup/repo.git
+  .\gitpkg.ps1 Clone  ssh://git@gitlab.com/group/subgroup/repo.git
   .\gitpkg.ps1 Pull
   .\gitpkg.ps1 Pull all
-  .\gitpkg.ps1 Pull BurntSushi/ripgrep
-  .\gitpkg.ps1 Remove BurntSushi/ripgrep
+  .\gitpkg.ps1 Pull github.com:BurntSushi/ripgrep
+  .\gitpkg.ps1 rm    github.com:BurntSushi/ripgrep
   .\gitpkg.ps1 List
   .\gitpkg.ps1 Export .\gitpkg.json
   .\gitpkg.ps1 Import .\gitpkg.json
@@ -251,7 +273,7 @@ function Get-GitpkgPackage {
 }
 
 function Add-GitpkgPackage([string]$Spec, [object]$Manifest = $null, [switch]$SkipSave) {
-  if ([string]::IsNullOrWhiteSpace($Spec)) { throw 'Add requires a repo spec.' }
+  if ([string]::IsNullOrWhiteSpace($Spec)) { throw 'Clone requires a repo spec.' }
   $repoRoot = Get-RepoRoot; Ensure-Dir $repoRoot
   $m = if ($null -ne $Manifest) { $Manifest } else { Import-Manifest }
   $pkg = ConvertTo-PackageSpec -Spec $Spec; $id = $pkg.Id
@@ -313,14 +335,26 @@ function Get-PackageUpdateStatus([string]$Id, [object]$Manifest, [string]$RepoRo
   if (-not (Test-Path -LiteralPath $dir) -or -not (Test-GitRepo -Dir $dir)) {
     return [PSCustomObject]@{ Package=$display; Status='missing'; Behind=''; Reason='' }
   }
+
   try {
     Invoke-Git -GitArgs @('fetch', '--quiet') -WorkingDir $dir | Out-Null
-    $behind    = (Invoke-Git -GitArgs @('rev-list','--count','HEAD..@{u}') -WorkingDir $dir).Stdout.Trim()
-    $available = ($behind -ne '' -and $behind -ne '0')
+    $statusOut = (Invoke-Git -GitArgs @('status', '--porcelain=v2', '--branch') -WorkingDir $dir).Stdout
+    $upstreamLine = (($statusOut -split "`r?`n") | Where-Object { $_ -like '# branch.upstream *' } | Select-Object -First 1)
+    if (-not $upstreamLine) {
+      return [PSCustomObject]@{ Package=$display; Status='error'; Behind=''; Reason='no upstream branch configured' }
+    }
+
+    $abLine = (($statusOut -split "`r?`n") | Where-Object { $_ -like '# branch.ab *' } | Select-Object -First 1)
+    $behindCount = 0
+    if ($abLine -and $abLine -match '# branch\.ab \+[0-9]+ -(?<behind>[0-9]+)') {
+      $behindCount = [int]$Matches.behind
+    }
+    $available = ($behindCount -gt 0)
+
     [PSCustomObject]@{
       Package = $display
       Status  = if ($available) { 'update available' } else { 'up-to-date' }
-      Behind  = if ($available) { "$behind commit$(if ($behind -ne '1') {'s'})" } else { '' }
+      Behind  = if ($available) { "$behindCount commit$(if ($behindCount -ne 1) {'s'})" } else { '' }
       Reason  = ''
     }
   } catch {
@@ -343,8 +377,74 @@ function Update-GitpkgPackage([string]$Target) {
   if ([string]::IsNullOrWhiteSpace($Target)) {
     if ($ids.Count -eq 0) { Write-Info 'No packages installed.'; return }
     Write-Info 'Checking for updates...'
-    $rows = foreach ($id in $ids) { Get-PackageUpdateStatus -Id $id -Manifest $m -RepoRoot $repoRoot }
-    $rows | Format-Table -AutoSize
+
+    $workItems = foreach ($id in $ids) {
+      $p = Get-PackageEntry $m $id
+      [PSCustomObject]@{
+        Id      = $id
+        Package = if ($p.display) { $p.display } else { $id }
+        Dir     = Get-PackageDir -RepoRoot $repoRoot -DirName $p.dir
+      }
+    }
+
+    $parallelSupported = (($PSVersionTable.PSVersion.Major -ge 7) -and (-not $NoParallelStatus))
+    if ($parallelSupported) {
+      $rows = $workItems | ForEach-Object -ThrottleLimit $StatusCheckThrottle -Parallel {
+        $display = $_.Package
+        $dir = $_.Dir
+
+        if (-not (Test-Path -LiteralPath $dir) -or -not (Test-Path -LiteralPath (Join-Path $dir '.git'))) {
+          return [PSCustomObject]@{ Package=$display; Status='missing'; Behind=''; Reason='' }
+        }
+
+        try {
+          & git -C $dir fetch --quiet 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            throw 'git fetch failed.'
+          }
+
+          $statusOut = & git -C $dir status --porcelain=v2 --branch 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw (($statusOut | Out-String).Trim())
+          }
+
+          $statusText = ($statusOut | Out-String)
+          $upstreamLine = (($statusText -split "`r?`n") | Where-Object { $_ -like '# branch.upstream *' } | Select-Object -First 1)
+          if (-not $upstreamLine) {
+            return [PSCustomObject]@{ Package=$display; Status='error'; Behind=''; Reason='no upstream branch configured' }
+          }
+
+          $abLine = (($statusText -split "`r?`n") | Where-Object { $_ -like '# branch.ab *' } | Select-Object -First 1)
+          $behindCount = 0
+          if ($abLine -and $abLine -match '# branch\.ab \+[0-9]+ -(?<behind>[0-9]+)') {
+            $behindCount = [int]$Matches.behind
+          }
+          $available = ($behindCount -gt 0)
+
+          [PSCustomObject]@{
+            Package = $display
+            Status  = if ($available) { 'update available' } else { 'up-to-date' }
+            Behind  = if ($available) { "$behindCount commit$(if ($behindCount -ne 1) {'s'})" } else { '' }
+            Reason  = ''
+          }
+        } catch {
+          $msg = $_.Exception.Message
+          $reason = if ($msg -match 'no upstream configured|no upstream branch|branch\.upstream') {
+            'no upstream branch configured'
+          } elseif ($msg -match 'Authentication failed|Permission denied|Could not read from remote repository') {
+            'authentication/permission failure'
+          } else {
+            ($msg -split "`r?`n")[0]
+          }
+
+          [PSCustomObject]@{ Package=$display; Status='error'; Behind=''; Reason=$reason }
+        }
+      }
+    } else {
+      $rows = foreach ($id in $ids) { Get-PackageUpdateStatus -Id $id -Manifest $m -RepoRoot $repoRoot }
+    }
+
+    $rows | Sort-Object Package | Format-Table -AutoSize
     return
   }
 
@@ -445,7 +545,7 @@ try {
     'export' { Export-GitpkgPackage -OutPath $Arg1 }
     'import' { Import-GitpkgPackage -InPath $Arg1 }
     default  {
-      # Treat bare specs (user/repo, host:user/repo, URLs, git@ URLs) as implicit Clone
+      # Treat bare specs (host:namespace/repo, URLs, git@ URLs) as implicit Clone
       try   { Add-GitpkgPackage -Spec $Command }
       catch { throw "Unknown command '$Command'. Run '.\gitpkg.ps1 help' for usage." }
     }

@@ -17,40 +17,42 @@ Just drop `gitpkg.ps1` somewhere on your machine and run it. No install step.
 
 ## Commands
 
-### Add
+### Clone
 
 Clones a repo into `~/gitpkgs` and records it in the manifest.
 
 ```powershell
-.\gitpkg.ps1 Add BurntSushi/ripgrep
-.\gitpkg.ps1 Add gitea.example.com:myorg/mytool
-.\gitpkg.ps1 Add https://github.com/cli/cli
-.\gitpkg.ps1 Add git@github.com:sharkdp/bat.git
+.\gitpkg.ps1 Clone github.com:BurntSushi/ripgrep
+.\gitpkg.ps1 Clone gitea.example.com:myorg/mytool
+.\gitpkg.ps1 Clone gitlab.com:group/subgroup/mytool
+.\gitpkg.ps1 Clone https://github.com/cli/cli
+.\gitpkg.ps1 Clone ssh://git@gitlab.com/group/subgroup/project.git
+.\gitpkg.ps1 Clone git@github.com:sharkdp/bat.git
 ```
 
 If the target directory already exists and is a git repo, it gets recorded in the manifest without re-cloning.
 
-### Get
+### List
 
 Lists all installed packages in a table with their status and URL.
 
 ```powershell
-.\gitpkg.ps1 Get
+.\gitpkg.ps1 List
 ```
 
-### Update
+### Pull
 
 No argument — fetches all remotes and shows a table of what's up to date and what has commits waiting.
 
 ```powershell
-.\gitpkg.ps1 Update
+.\gitpkg.ps1 Pull
 ```
 
-Pass `all` to actually pull every package, or a spec to update one.
+Pass `all` to actually pull every package, or a spec to pull one.
 
 ```powershell
-.\gitpkg.ps1 Update all
-.\gitpkg.ps1 Update BurntSushi/ripgrep
+.\gitpkg.ps1 Pull all
+.\gitpkg.ps1 Pull github.com:BurntSushi/ripgrep
 ```
 
 ### Remove
@@ -58,13 +60,13 @@ Pass `all` to actually pull every package, or a spec to update one.
 Deletes the repo directory and removes it from the manifest.
 
 ```powershell
-.\gitpkg.ps1 Remove BurntSushi/ripgrep
+.\gitpkg.ps1 Rm github.com:BurntSushi/ripgrep
 ```
 
 Pass `-KeepFiles` to only remove it from the manifest, leaving the files on disk.
 
 ```powershell
-.\gitpkg.ps1 Remove BurntSushi/ripgrep -KeepFiles
+.\gitpkg.ps1 Rm github.com:BurntSushi/ripgrep -KeepFiles
 ```
 
 ### Export / Import
@@ -80,14 +82,21 @@ Export without a path prints the JSON to stdout, handy for piping or quick inspe
 
 ## Spec formats
 
-All commands that take a repo accept a few different formats:
+All commands that take a repo accept a few different formats. For cross-host portability,
+prefer a full clone URL.
 
 | Format | Example | Resolves to |
 |---|---|---|
-| `user/repo` | `cli/cli` | `github.com:cli/cli` |
-| `host:user/repo` | `codeberg.org:user/tool` | `codeberg.org:user/tool` |
-| HTTPS URL | `https://github.com/cli/cli` | as-is (`.git` appended if missing) |
-| SSH URL | `git@github.com:cli/cli.git` | as-is |
+| `host:namespace/repo` | `codeberg.org:user/tool` | `https://codeberg.org/user/tool.git` |
+| HTTPS URL | `https://gitlab.com/group/subgroup/tool` | as-is (`.git` appended if missing) |
+| SSH URL (`ssh://`) | `ssh://git@gitlab.com/group/subgroup/tool.git` | normalized to `ssh://user@host/path.git` |
+| SSH URL (scp style) | `git@github.com:cli/cli.git` | as-is |
+
+Path rules:
+
+- Namespace depth can be more than one segment (for example `group/subgroup/repo`).
+- Repo path must be at least two segments (`namespace/repo`).
+- `user/repo` shorthand is intentionally not supported to avoid host ambiguity.
 
 ## File locations
 
@@ -100,8 +109,10 @@ All commands that take a repo accept a few different formats:
 
 | Flag | What it does |
 |---|---|
-| `-KeepFiles` | Used with `Remove` — skips deleting the directory |
+| `-KeepFiles` | Used with `Rm` — skips deleting the directory |
 | `-Quiet` | Suppresses informational output |
+| `-StatusCheckThrottle` | Max parallel workers for `Pull` status checks (default `6`) |
+| `-NoParallelStatus` | Force sequential status checks for `Pull` |
 
 ## Support
 
