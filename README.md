@@ -34,7 +34,8 @@ If the target directory already exists and is a git repo, it gets recorded in th
 
 ### List
 
-Lists all installed packages in a table with their status and URL.
+Lists all installed packages in a table with canonical package IDs
+(`host:namespace/repo`), status, and URL.
 
 ```powershell
 .\gitpkg.ps1 List

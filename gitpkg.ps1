@@ -194,6 +194,24 @@ function Import-Manifest {
   if (-not $obj.PSObject.Properties['version'])   { $obj | Add-Member -NotePropertyName version   -NotePropertyValue 1 -Force }
   if (-not $obj.PSObject.Properties['createdAt']) { $obj | Add-Member -NotePropertyName createdAt -NotePropertyValue (Get-Date -Format 'o') -Force }
   if (-not $obj.PSObject.Properties['updatedAt']) { $obj | Add-Member -NotePropertyName updatedAt -NotePropertyValue (Get-Date -Format 'o') -Force }
+
+  foreach ($prop in $obj.packages.PSObject.Properties) {
+    $pkg = $prop.Value
+    if (-not $pkg) { continue }
+
+    if (-not $pkg.PSObject.Properties['id']) {
+      $pkg | Add-Member -NotePropertyName id -NotePropertyValue $prop.Name -Force
+    } else {
+      $pkg.id = $prop.Name
+    }
+
+    if (-not $pkg.PSObject.Properties['display']) {
+      $pkg | Add-Member -NotePropertyName display -NotePropertyValue $prop.Name -Force
+    } else {
+      $pkg.display = $prop.Name
+    }
+  }
+
   $obj
 }
 
@@ -264,7 +282,7 @@ function Get-GitpkgPackage {
     $p   = Get-PackageEntry $m $id
     $dir = Get-PackageDir -RepoRoot $repoRoot -DirName $p.dir
     [PSCustomObject]@{
-      Package = if ($p.display) { $p.display } else { $id }
+      Package = if ($p.id) { $p.id } else { $id }
       Status  = (Test-Path -LiteralPath $dir) ? 'ok' : 'missing'
       URL     = $p.url
     }
@@ -297,7 +315,7 @@ function Add-GitpkgPackage([string]$Spec, [object]$Manifest = $null, [switch]$Sk
   }
 
   $m.packages | Add-Member -NotePropertyName $id -NotePropertyValue ([PSCustomObject]@{
-    id = $id; display = $pkg.Display; url = $pkg.Url
+    id = $id; display = $id; url = $pkg.Url
     dir = $dirName; installed = (Get-Date -Format 'o')
   }) -Force
   if (-not $SkipSave) { Export-Manifest $m }
@@ -329,7 +347,7 @@ function Get-PackageUpdateStatus([string]$Id, [object]$Manifest, [string]$RepoRo
   $p = Get-PackageEntry $Manifest $Id
   if (-not $p) { return [PSCustomObject]@{ Package=$Id; Status='not in manifest'; Behind=''; Reason='' } }
 
-  $display = if ($p.display) { $p.display } else { $Id }
+  $display = if ($p.id) { $p.id } else { $Id }
   $dir     = Get-PackageDir -RepoRoot $RepoRoot -DirName $p.dir
 
   if (-not (Test-Path -LiteralPath $dir) -or -not (Test-GitRepo -Dir $dir)) {
@@ -382,7 +400,7 @@ function Update-GitpkgPackage([string]$Target) {
       $p = Get-PackageEntry $m $id
       [PSCustomObject]@{
         Id      = $id
-        Package = if ($p.display) { $p.display } else { $id }
+        Package = if ($p.id) { $p.id } else { $id }
         Dir     = Get-PackageDir -RepoRoot $repoRoot -DirName $p.dir
       }
     }
