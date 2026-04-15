@@ -247,7 +247,7 @@ Commands:
                            spec:   update one package
                            all:    update all packages
   rm      <spec>           Uninstall a package
-          [-KeepFiles]     Remove from manifest only, keep files on disk
+          [keep]     Remove from manifest only, keep files on disk
   list                     List installed packages
   export  [path]           Export package list to JSON (stdout if no path)
   import  <path>           Install all packages from an export file
