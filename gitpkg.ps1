@@ -161,7 +161,7 @@ switch ($Command) {
             }
         }
 
-        Write-Host "Checking remote servers for updates... " -ForegroundColor Cyan
+        Write-Host "Checking remote servers for changes... " -ForegroundColor Cyan
         $StatusList = @()
         foreach ($pkg in $TargetPackages) {
             $skipMsg = if ($pkg.Frozen) { " (Frozen)" } else { "" }
