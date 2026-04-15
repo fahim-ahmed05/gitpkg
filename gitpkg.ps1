@@ -90,6 +90,17 @@ function Get-ManifestPath { Join-Path (Get-ConfigRoot) 'manifest.json' }
 
 function Get-PackageDir([string]$RepoRoot, [string]$DirName) { Join-Path $RepoRoot $DirName }
 
+function Assert-PathUnderRoot([string]$Path, [string]$Root, [string]$Context) {
+  $fullPath = [System.IO.Path]::GetFullPath($Path)
+  $fullRoot = [System.IO.Path]::GetFullPath($Root)
+  $sep = [System.IO.Path]::DirectorySeparatorChar
+  if (-not $fullRoot.EndsWith($sep)) { $fullRoot = "$fullRoot$sep" }
+
+  if (-not $fullPath.StartsWith($fullRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to operate on $Context outside repo root: $fullPath"
+  }
+}
+
 function Ensure-Dir([string]$Path) {
   if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path | Out-Null }
 }
@@ -235,10 +246,11 @@ function Get-GitpkgPackage {
   $rows | Format-Table -AutoSize
 }
 
-function Add-GitpkgPackage([string]$Spec) {
+function Add-GitpkgPackage([string]$Spec, [object]$Manifest = $null, [switch]$SkipSave) {
   if ([string]::IsNullOrWhiteSpace($Spec)) { throw 'Add requires a repo spec.' }
   $repoRoot = Get-RepoRoot; Ensure-Dir $repoRoot
-  $m = Import-Manifest; $pkg = ConvertTo-PackageSpec -Spec $Spec; $id = $pkg.Id
+  $m = if ($null -ne $Manifest) { $Manifest } else { Import-Manifest }
+  $pkg = ConvertTo-PackageSpec -Spec $Spec; $id = $pkg.Id
 
   if (Get-PackageEntry $m $id) { Write-Warn "Already installed: $id"; return }
 
@@ -262,7 +274,7 @@ function Add-GitpkgPackage([string]$Spec) {
     id = $id; display = $pkg.Display; url = $pkg.Url
     dir = $dirName; installed = (Get-Date -Format 'o')
   }) -Force
-  Export-Manifest $m
+  if (-not $SkipSave) { Export-Manifest $m }
   Write-Info "Installed: $id"
 }
 
@@ -279,8 +291,7 @@ function Update-OnePackage([string]$Id) {
   if (-not (Test-GitRepo -Dir $dir)) { throw "Not a git repo for '${Id}': $dir" }
   Write-Info "Updating $Id..."
   $before = (Invoke-Git -GitArgs @('rev-parse', 'HEAD') -WorkingDir $dir).Stdout.Trim()
-  & git -C $dir pull --ff-only
-  if ($LASTEXITCODE -ne 0) { throw "git pull failed for '$Id' (exit $LASTEXITCODE)." }
+  Invoke-Git -GitArgs @('pull', '--ff-only') -WorkingDir $dir | Out-Null
   $after  = (Invoke-Git -GitArgs @('rev-parse', 'HEAD') -WorkingDir $dir).Stdout.Trim()
   if ($before -ne $after) { 'updated' } else { 'latest' }
 }
@@ -340,7 +351,9 @@ function Remove-GitpkgPackage([string]$Spec, [switch]$KeepFiles) {
   $m  = Import-Manifest; $p = Get-PackageEntry $m $id
   if (-not $p) { Write-Warn "Not found in manifest: $id"; return }
 
-  $dir = Get-PackageDir -RepoRoot (Get-RepoRoot) -DirName $p.dir
+  $repoRoot = Get-RepoRoot
+  $dir = Get-PackageDir -RepoRoot $repoRoot -DirName $p.dir
+  Assert-PathUnderRoot -Path $dir -Root $repoRoot -Context "package directory '$id'"
   if ($KeepFiles) {
     Write-Info "Keeping files at $dir (manifest only)."
   } elseif (Test-Path -LiteralPath $dir) {
@@ -374,20 +387,22 @@ function Import-GitpkgPackage([string]$InPath) {
   $obj = Get-Content -LiteralPath $InPath -Raw | ConvertFrom-Json -Depth 64
   if (-not $obj.PSObject.Properties['packages']) { throw "Invalid export file: missing 'packages' field." }
 
+  $m = Import-Manifest
   $installed = 0; $skipped = 0; $failed = 0
   foreach ($entry in $obj.packages) {
     try {
       if ([string]::IsNullOrWhiteSpace($entry.url)) { throw "Entry is missing 'url'." }
       $id = (ConvertTo-PackageSpec -Spec $entry.url).Id
-      $m  = Import-Manifest
       if (Get-PackageEntry $m $id) { $skipped++; continue }
-      Add-GitpkgPackage -Spec $entry.url
+      Add-GitpkgPackage -Spec $entry.url -Manifest $m -SkipSave
       $installed++
     } catch {
       $failed++
       Write-Err "Import failed [$($entry.url)]: $($_.Exception.Message)"
     }
   }
+
+  if ($installed -gt 0) { Export-Manifest $m }
   Write-Info "Import complete — installed: $installed  skipped: $skipped  failed: $failed"
   if ($failed -gt 0) { throw 'Import completed with failures.' }
 }
