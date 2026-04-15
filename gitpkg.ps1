@@ -5,10 +5,10 @@ Repos root:    ~/gitpkgs
 Manifest:      ~/.config/gitpkg/manifest.json
 
 Commands:
-  add     <spec>           Clone a repo  (or: gitpkg <spec>)
-  update  [spec|all]       Check for updates (no arg), or update "user/repo" / all
+  clone   <spec>           Clone a repo  (or: gitpkg <spec>)
+  pull    [spec|all]       Check for updates (no arg), or update "user/repo" / all
   rm  <spec> [-keep]       Remove a repo, optionally keeping files on disk
-  get                      List cloned repos
+  list                     List cloned repos
   export  [path]           Export repo list to JSON (or stdout)
   import  <path>           Clone all repos from an export file
   help
@@ -204,13 +204,13 @@ Roots:
   Manifest:  ~/.config/gitpkg/manifest.json
 
 Commands:
-  Add     <spec>           Install (clone) a repo package  (or: gitpkg <spec>)
-  Update  [spec|all]       No arg: show update status table
+  Clone   <spec>           Install (clone) a repo package  (or: gitpkg <spec>)
+  Pull    [spec|all]       No arg: show update status table
                            spec:   update one package
                            all:    update all packages
   Remove  <spec>           Uninstall a package
           [-KeepFiles]     Remove from manifest only, keep files on disk
-  Get                      List installed packages
+  List                     List installed packages
   Export  [path]           Export package list to JSON (stdout if no path)
   Import  <path>           Install all packages from an export file
   Help                     Show this help
@@ -223,12 +223,12 @@ Specs:
 
 Examples:
   .\gitpkg.ps1 BurntSushi/ripgrep
-  .\gitpkg.ps1 Add    BurntSushi/ripgrep
-  .\gitpkg.ps1 Update
-  .\gitpkg.ps1 Update all
-  .\gitpkg.ps1 Update BurntSushi/ripgrep
+  .\gitpkg.ps1 Clone  BurntSushi/ripgrep
+  .\gitpkg.ps1 Pull
+  .\gitpkg.ps1 Pull all
+  .\gitpkg.ps1 Pull BurntSushi/ripgrep
   .\gitpkg.ps1 Remove BurntSushi/ripgrep
-  .\gitpkg.ps1 Get
+  .\gitpkg.ps1 List
   .\gitpkg.ps1 Export .\gitpkg.json
   .\gitpkg.ps1 Import .\gitpkg.json
 "@ | Write-Host
@@ -282,10 +282,11 @@ function Add-GitpkgPackage([string]$Spec, [object]$Manifest = $null, [switch]$Sk
   Write-Info "Installed: $id"
 }
 
-function Update-OnePackage([string]$Id) {
-  $m = Import-Manifest; $p = Get-PackageEntry $m $Id
+function Update-OnePackage([string]$Id, [object]$Manifest = $null, [string]$RepoRoot = $null) {
+  $m = if ($null -ne $Manifest) { $Manifest } else { Import-Manifest }
+  $p = Get-PackageEntry $m $Id
   if (-not $p) { throw "Package not found in manifest: $Id" }
-  $repoRoot = Get-RepoRoot
+  $repoRoot = if ([string]::IsNullOrWhiteSpace($RepoRoot)) { Get-RepoRoot } else { $RepoRoot }
   Ensure-Dir $repoRoot
   $dir = Get-PackageDir -RepoRoot $repoRoot -DirName $p.dir
 
@@ -351,7 +352,7 @@ function Update-GitpkgPackage([string]$Target) {
     if ($ids.Count -eq 0) { Write-Info 'No packages installed.'; return }
     $failCount = 0
     foreach ($id in $ids) {
-      try   { Update-OnePackage -Id $id | Out-Null }
+      try   { Update-OnePackage -Id $id -Manifest $m -RepoRoot $repoRoot | Out-Null }
       catch { $failCount++; Write-Err "Failed [$id]: $($_.Exception.Message)" }
     }
     if ($failCount -gt 0) { throw "Update finished with $failCount failure(s)." }
@@ -359,7 +360,7 @@ function Update-GitpkgPackage([string]$Target) {
   }
 
   $id = (ConvertTo-PackageSpec -Spec $Target).Id
-  $status = Update-OnePackage -Id $id
+  $status = Update-OnePackage -Id $id -Manifest $m -RepoRoot $repoRoot
   if ($status -eq 'updated') { Write-Info "Updated: $id" } else { Write-Info "Already latest: $id" }
 }
 
@@ -437,14 +438,14 @@ try {
 
   switch ($Command.ToLowerInvariant()) {
     'help'   { Show-Help }
-    'get'    { Get-GitpkgPackage }
-    'add'    { Add-GitpkgPackage    -Spec $Arg1 }
-    'update' { Update-GitpkgPackage -Target $Arg1 }
+    'list'   { Get-GitpkgPackage }
+    'clone'  { Add-GitpkgPackage    -Spec $Arg1 }
+    'pull'   { Update-GitpkgPackage -Target $Arg1 }
     'rm'     { Remove-GitpkgPackage -Spec $Arg1 -KeepFiles:$KeepFiles }
     'export' { Export-GitpkgPackage -OutPath $Arg1 }
     'import' { Import-GitpkgPackage -InPath $Arg1 }
     default  {
-      # Treat bare specs (user/repo, host:user/repo, URLs, git@ URLs) as implicit Add
+      # Treat bare specs (user/repo, host:user/repo, URLs, git@ URLs) as implicit Clone
       try   { Add-GitpkgPackage -Spec $Command }
       catch { throw "Unknown command '$Command'. Run '.\gitpkg.ps1 help' for usage." }
     }
