@@ -1,132 +1,99 @@
 # Git Package Manager
 
-A simple PowerShell script for managing git repos as packages. Clone repos into `~/gitpkgs`, track them in a manifest, and keep everything up to date — no package registry needed.
+A lightweight Git repository manager for PowerShell. 
 
-## Requirements
+If you pull down a lot of random Git repositories to use as plugins (like mpv scripts, terminal themes, or shell tools) and hate manually tracking and updating them, this is for you. It treats Git repositories like packages, tracking them centrally and allowing for bulk updates, interactive removals, and cross-machine syncing.
 
-- PowerShell 7+
-- Git in PATH
+## Features
 
-## Getting started
+* **Smart Cloning:** Automatically detects default branches and performs shallow clones to save disk space and time. Supports both HTTPS and SSH.
+* **Collision Proof:** Hashes repository URLs and branches so you can install the main branch and a dev branch of the exact same tool side by side without folder conflicts.
+* **Status Checks:** Run a dry pull to see exactly which repositories are outdated before you download any changes.
+* **Auto-Healing:** If you accidentally delete a cloned folder, the script flags it as missing and automatically restores it on your next pull.
+* **Portable:** Export your setup to a JSON file and import it on a new machine to instantly rebuild your environment.
 
-Just drop `gitpkg.ps1` somewhere on your machine and run it. No install step.
+## Installation
 
-```powershell
-.\gitpkg.ps1 Help
-```
-
-## Commands
-
-### Clone
-
-Clones a repo into `~/gitpkgs` and records it in the manifest. By default, the primary branch is cloned. To clone a specific branch, append `@branch_name` to the spec.
+Download `gitpkg.ps1` and place it anywhere in your system. To make it feel like a native command, add an alias to your PowerShell `$PROFILE`:
 
 ```powershell
-.\gitpkg.ps1 Clone github.com:BurntSushi/ripgrep
-.\gitpkg.ps1 Clone github.com:BurntSushi/ripgrep@develop
-.\gitpkg.ps1 Clone gitea.example.com:myorg/mytool
-.\gitpkg.ps1 Clone gitlab.com:group/subgroup/mytool@stable
-.\gitpkg.ps1 Clone https://github.com/cli/cli
-.\gitpkg.ps1 Clone https://github.com/cli/cli@latest-release
-.\gitpkg.ps1 Clone ssh://git@gitlab.com/group/subgroup/project.git@feature-branch
-.\gitpkg.ps1 Clone git@github.com:sharkdp/bat.git
+Set-Alias gitpkg C:\path\to\your\scripts\gitpkg.ps1
 ```
 
-If the target directory already exists and is a git repo, it gets recorded in the manifest without re-cloning.
-
-Packages are stored in folders named `host@namespace@repo@branch` (for example, `github.com@BurntSushi@ripgrep@main`).
-
-### List
-
-Lists all installed packages in a table with canonical package IDs
-(`host:namespace/repo@branch`), status, URL, and branch.
+### Enable Tab Autocompletion
+Add this snippet to your `$PROFILE` so you can hit Tab to autocomplete your installed repository names when pulling or removing:
 
 ```powershell
-.\gitpkg.ps1 List
+Register-ArgumentCompleter -CommandName gitpkg -ParameterName Target -ScriptBlock {
+    param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
+    $ConfigFile = Join-Path $env:USERPROFILE ".config\gitpkg\repos.json"
+    if (Test-Path $ConfigFile) {
+        $packages = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+        if ($packages) {
+            $packages.Name | Where-Object { $_ -match "^$wordToComplete" } | ForEach-Object {
+                [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+            }
+        }
+    }
+}
 ```
 
-### Pull
+## Usage
 
-No argument — fetches all remotes and shows a table of what's up to date and what has commits waiting.
-
+### Install a repository
+Just pass the URL. It will figure out the default branch automatically.
 ```powershell
-.\gitpkg.ps1 Pull
+gitpkg clone https://github.com/somedev/uosc
 ```
 
-Pass `all` to actually pull every package, or a spec to pull one.
-
+If you want a specific branch, pass it as the second argument:
 ```powershell
-.\gitpkg.ps1 Pull all
-.\gitpkg.ps1 Pull github.com:BurntSushi/ripgrep
+gitpkg clone git@github.com:somedev/uosc.git dev
 ```
 
-### Remove
-
-Deletes the repo directory and removes it from the manifest.
-
+### Update your packages
+Run pull without arguments to check for updates across all your tracked repositories without actually downloading anything.
 ```powershell
-.\gitpkg.ps1 Rm github.com:BurntSushi/ripgrep
+gitpkg pull
 ```
 
-Pass `-KeepFiles` to only remove it from the manifest, leaving the files on disk.
-
+To actually download the changes:
 ```powershell
-.\gitpkg.ps1 Rm github.com:BurntSushi/ripgrep -KeepFiles
+# Update everything at once
+gitpkg pull all
+
+# Update just one specific package
+gitpkg pull uosc
 ```
 
-### Export / Import
-
-Save your package list to a JSON file and restore it on another machine.
-
+### See what is installed
+Lists all tracked repositories, their current branch, and their unique hash.
 ```powershell
-.\gitpkg.ps1 Export .\packages.json
-.\gitpkg.ps1 Import .\packages.json
+gitpkg list
 ```
 
-Export without a path prints the JSON to stdout, handy for piping or quick inspection.
+### Remove a package
+You can remove by name, exact ID, or hash. If multiple packages share the same name, gitpkg will prompt you with a numbered list so you don't delete the wrong one.
+```powershell
+gitpkg rm uosc
+```
 
-## Spec formats
+### Sync across machines
+Export your current configuration to a JSON file:
+```powershell
+gitpkg export .\my-plugins.json
+```
 
-All commands that take a repo accept a few different formats. For cross-host portability,
-prefer a full clone URL. To clone a specific branch, append `@branch_name` (defaults to `main`).
+Import that JSON file on a new machine. It will register the packages and wait for you to run `gitpkg pull all` to handle the actual downloading.
+```powershell
+gitpkg import .\my-plugins.json
+```
 
-| Format | Example | Resolves to |
-|---|---|---|
-| `host:namespace/repo[@branch]` | `codeberg.org:user/tool@stable` | `https://codeberg.org/user/tool.git`, cloned from stable branch |
-| HTTPS URL with branch | `https://gitlab.com/group/subgroup/tool@develop` | as-is, cloned from develop |
-| SSH URL (`ssh://`) | `ssh://git@gitlab.com/group/subgroup/tool.git@feature-x` | normalized to `ssh://user@host/path.git`, cloned from feature-x |
-| SSH URL (scp style) | `git@github.com:cli/cli.git@latest` | as-is, cloned from latest branch |
+## Under the Hood
 
-Path rules:
+The script keeps configuration data separate from the actual payloads. 
 
-- Namespace depth can be more than one segment (for example `group/subgroup/repo`).
-- Repo path must be at least two segments (`namespace/repo`).
-- `user/repo` shorthand is intentionally not supported to avoid host ambiguity.
-- Branch is optional; if omitted, defaults to `main`.
-- Multiple clones of the same repo with different branches are stored in separate directories.
+* Config is stored in: `~/.config/gitpkg/repos.json`
+* Repositories are cloned to: `~/gitpkg/`
 
-## File locations
-
-| Path | What it is |
-|---|---|
-| `~/gitpkgs/` | Where all repos are cloned |
-| `~/.config/gitpkg/manifest.json` | Tracks installed packages |
-
-## Flags
-
-| Flag | What it does |
-|---|---|
-| `-KeepFiles` | Used with `Rm` — skips deleting the directory |
-| `-Quiet` | Suppresses informational output messages (warnings/errors still show) |
-| `-StatusCheckThrottle` | Max parallel workers for `Pull` status checks with no target (default `6`, range `1..32`) |
-| `-NoParallelStatus` | Forces sequential status checks for `Pull` with no target |
-
-## Support
-
-If you find this helpful, consider supporting.
-
-<a href="https://www.buymeacoffee.com/fahim.ahmed" target="_blank">
-  <img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" 
-       alt="Buy Me A Coffee"
-       style="height: 41px !important; width: 174px !important; box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5);" />
-</a>
+To prevent name collisions, folders are named using a hash of their domain, path, and branch. For example, cloning `uosc` will result in a folder named something like `uosc@main-3f8a9b21`.

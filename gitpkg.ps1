@@ -1,601 +1,301 @@
-<#
-gitpkg.ps1 - git-backed package manager
-
-Repos root:    ~/gitpkgs
-Manifest:      ~/.config/gitpkg/manifest.json
-
-Commands:
-  clone   <spec>           Clone a repo  (or: gitpkg <spec>)
-  pull    [spec|all]       Check for updates (no arg), or update "spec" / all
-  rm  <spec> [-keep]       Remove a repo, optionally keeping files on disk
-  list                     List cloned repos
-  export  [path]           Export repo list to JSON (or stdout)
-  import  <path>           Clone all repos from an export file
-  help
-
-Flags:
-  -Quiet                        Suppress informational output
-  -StatusCheckThrottle <1..32>  Max parallel workers for "pull" status checks (default 6)
-  -NoParallelStatus             Force sequential status checks for "pull" with no target
-
-Specs accepted:
-  host:namespace/repo[@branch]                     => https://host/namespace/repo.git (defaults to main if branch omitted)
-  https://host/namespace/.../repo(.git)[@branch]
-  ssh://user@host/namespace/.../repo(.git)[@branch]
-  git@host:namespace/.../repo(.git)[@branch]
-#>
-
-[CmdletBinding()]
 param(
-  [Parameter(Position=0)]
-  [string]$Command,
+    [Parameter(Mandatory=$true, Position=0)]
+    [ValidateSet('clone', 'pull', 'list', 'rm', 'export', 'import')]
+    [string]$Command,
 
-  [Parameter(Position=1)]
-  [string]$Arg1,
+    [Parameter(Position=1)]
+    [string]$Target,
 
-  [switch]$KeepFiles,
-  [switch]$Quiet,
+    [Parameter(Position=2)]
+    [string]$Branch, 
 
-  [ValidateRange(1, 32)]
-  [int]$StatusCheckThrottle = 6,
-
-  [switch]$NoParallelStatus
+    [string]$Name
 )
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-
-function Write-Info([string]$msg) { if (-not $Quiet) { Write-Host $msg } }
-function Write-Warn([string]$msg) { Write-Warning $msg }
-function Write-Err([string]$msg)  { Write-Host $msg -ForegroundColor Red }
-
-function Assert-GitAvailable {
-  if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    throw "git was not found in PATH. Install Git and try again."
-  }
+if (-not (Get-Command "git" -ErrorAction SilentlyContinue)) {
+    Write-Host "Error: 'git' command not found. Please install Git and ensure it is in your system PATH." -ForegroundColor Red
+    exit 1
 }
 
-function Invoke-Git {
-  param(
-    [string[]]$GitArgs,
-    [string]$WorkingDir = $null
-  )
-  $psi = [System.Diagnostics.ProcessStartInfo]::new()
-  $psi.FileName               = 'git'
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError  = $true
-  $psi.UseShellExecute        = $false
-  $psi.CreateNoWindow         = $true
-  if ($WorkingDir) { $psi.WorkingDirectory = $WorkingDir }
-  foreach ($a in $GitArgs) { [void]$psi.ArgumentList.Add($a) }
+$ConfigDir = Join-Path $env:USERPROFILE ".config\gitpkg"
+$ConfigFile = Join-Path $ConfigDir "repos.json"
+$InstallDir = Join-Path $env:USERPROFILE "gitpkg"
 
-  $proc = [System.Diagnostics.Process]::new()
-  $proc.StartInfo = $psi
-  [void]$proc.Start()
-  $stdout = $proc.StandardOutput.ReadToEnd()
-  $stderr = $proc.StandardError.ReadToEnd()
-  $proc.WaitForExit()
+if (-not (Test-Path $ConfigDir)) { New-Item -ItemType Directory -Path $ConfigDir | Out-Null }
+if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir | Out-Null }
+if (-not (Test-Path $ConfigFile)) { Set-Content -Path $ConfigFile -Value "[]" }
 
-  if ($proc.ExitCode -ne 0) {
-    throw "git $($GitArgs -join ' ') failed (exit $($proc.ExitCode)).`n$($stderr.Trim())"
-  }
-  [PSCustomObject]@{ Stdout = $stdout; Stderr = $stderr }
+function Get-Packages {
+    $content = Get-Content $ConfigFile -Raw
+    if ([string]::IsNullOrWhiteSpace($content) -or $content -eq '[]') { return @() }
+    return @($content | ConvertFrom-Json)
 }
 
-function Test-GitRepo([string]$Dir) {
-  Test-Path -LiteralPath (Join-Path $Dir '.git')
+function Save-Packages {
+    param([array]$Packages)
+    if ($Packages.Count -eq 0) {
+        Set-Content -Path $ConfigFile -Value "[]"
+    } else {
+        $Packages | ConvertTo-Json -Depth 2 | Set-Content -Path $ConfigFile
+    }
 }
 
-function Get-RepoRoot {
-  if ([string]::IsNullOrWhiteSpace($HOME)) { throw 'HOME is not set.' }
-  Join-Path $HOME 'gitpkgs'
+function Get-ShortHash {
+    param([string]$InputString)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($InputString)
+    $hash = [System.Security.Cryptography.MD5]::Create().ComputeHash($bytes)
+    $hex = [System.BitConverter]::ToString($hash) -replace '-'
+    return $hex.Substring(0, 8).ToLower()
 }
 
-function Get-ConfigRoot {
-  if ([string]::IsNullOrWhiteSpace($HOME)) { throw 'HOME is not set.' }
-  Join-Path $HOME '.config\gitpkg'
-}
-
-function Get-ManifestPath { Join-Path (Get-ConfigRoot) 'manifest.json' }
-
-function Get-PackageDir([string]$RepoRoot, [string]$DirName) { Join-Path $RepoRoot $DirName }
-
-function Assert-PathUnderRoot([string]$Path, [string]$Root, [string]$Context) {
-  $fullPath = [System.IO.Path]::GetFullPath($Path)
-  $fullRoot = [System.IO.Path]::GetFullPath($Root)
-  $sep = [System.IO.Path]::DirectorySeparatorChar
-  if (-not $fullRoot.EndsWith($sep)) { $fullRoot = "$fullRoot$sep" }
-
-  if (-not $fullPath.StartsWith($fullRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "Refusing to operate on $Context outside repo root: $fullPath"
-  }
-}
-
-function Ensure-Dir([string]$Path) {
-  if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path | Out-Null }
-}
-
-function Format-SafeFsName([string]$s) {
-  $clean = ($s -replace '[^\w\.\-]+', '_').Trim('_')
-  if ([string]::IsNullOrWhiteSpace($clean)) { throw "Cannot derive a valid directory name from '$s'." }
-  $clean
-}
-
-function Get-DirName([string]$Id, [string]$Branch = 'main') {
-  # Use ~ as separator; it's not allowed in git repo/user names or domain names
-  # Don't use Format-SafeFsName as it converts ~ to _
-  $id.Replace(':', '~').Replace('/', '~') + "~$Branch"
-}
-
-function Format-PathPart([string]$p) {
-  $t = $p.Trim().TrimStart('/').TrimEnd('/')
-  if ($t.EndsWith('.git', [System.StringComparison]::OrdinalIgnoreCase)) { $t = $t.Substring(0, $t.Length - 4) }
-  $t
-}
-
-function Test-RepoPath([string]$Path) {
-  if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-  ($Path -match '^[^/\s]+(?:/[^/\s]+)+$')
-}
-
-function ConvertTo-PackageSpec([string]$Spec) {
-  if ([string]::IsNullOrWhiteSpace($Spec)) { throw 'Missing repo spec.' }
-  $s = $Spec.Trim()
-  $branch = 'main'
-
-  if ($s -match '^(?<host>[^:\s]+):(?<path>[^/\s@]+(?:/[^/\s@]+)+)(?:@(?<branch>[^\s]+))?$') {
-    $rh = $Matches.host; $path = Format-PathPart $Matches.path
-    if ($Matches['branch']) { $branch = $Matches['branch'] }
-    return [PSCustomObject]@{ Id="${rh}:${path}@${branch}"; Url="https://$rh/$path.git"; Host=$rh; Path=$path; Branch=$branch; Display="$path@$branch" }
-  }
-
-  if ($s -match '^https?://') {
+function Get-RemoteDefaultBranch {
+    param([string]$Url)
     try {
-      $u = [Uri]$s; $rh = $u.Host; $path = Format-PathPart $u.AbsolutePath
-      if (-not (Test-RepoPath $path)) { throw "URL path must be namespace/repo with at least two segments (got '$path')." }
-      $url = if (-not $s.EndsWith('.git', [System.StringComparison]::OrdinalIgnoreCase)) { "$($u.Scheme)://$rh/$path.git" } else { $s }
-      return [PSCustomObject]@{ Id="${rh}:${path}@${branch}"; Url=$url; Host=$rh; Path=$path; Branch=$branch; Display="$path@$branch" }
-    } catch [System.UriFormatException] { throw "Malformed URL: $s" }
-  }
-
-  if ($s -match '^ssh://') {
-    try {
-      $u = [Uri]$s
-      if ($u.Scheme -ne 'ssh') { throw "Unsupported URL scheme '$($u.Scheme)'." }
-      $rh = $u.Host
-      $path = Format-PathPart $u.AbsolutePath
-      if (-not (Test-RepoPath $path)) { throw "URL path must be namespace/repo with at least two segments (got '$path')." }
-      $user = if ([string]::IsNullOrWhiteSpace($u.UserInfo)) { 'git' } else { $u.UserInfo }
-      $portPart = if ($u.IsDefaultPort) { '' } else { ":$($u.Port)" }
-      $url = "ssh://$user@$rh$portPart/$path.git"
-      $hostForId = "$rh$portPart"
-      return [PSCustomObject]@{ Id="${hostForId}:${path}@${branch}"; Url=$url; Host=$hostForId; Path=$path; Branch=$branch; Display="$path@$branch" }
-    } catch [System.UriFormatException] { throw "Malformed SSH URL: $s" }
-  }
-
-  if ($s -match '^(?<user>[^@\s]+)@(?<host>[^:\s]+):(?<path>[^/\s@]+(?:/[^/\s@]+)+?)(?:@(?<branch>[^\s]+))?(\.git)?$') {
-    $rh = $Matches.host; $path = Format-PathPart $Matches.path
-    if ($Matches['branch']) { $branch = $Matches['branch'] }
-    return [PSCustomObject]@{ Id="${rh}:${path}@${branch}"; Url=$s; Host=$rh; Path=$path; Branch=$branch; Display="$path@$branch" }
-  }
-
-  throw "Unrecognised spec '$Spec'. Use: host:namespace/repo[@branch] | https://host/namespace/repo(.git)[@branch] | ssh://user@host/namespace/repo(.git)[@branch] | git@host:namespace/repo(.git)[@branch]"
+        $output = & git ls-remote --symref $Url HEAD 2>$null
+        $outputString = $output -join "`n"
+        if ($outputString -match 'ref: refs/heads/([^\s]+)\s+HEAD') { return $matches[1] }
+    } catch {}
+    return "master" 
 }
 
-function New-EmptyManifest {
-  [PSCustomObject]@{
-    version = 1; packages = [PSCustomObject]@{}
-    createdAt = (Get-Date -Format 'o'); updatedAt = (Get-Date -Format 'o')
-  }
-}
-
-function Import-Manifest {
-  Ensure-Dir (Get-ConfigRoot)
-  $path = Get-ManifestPath
-  if (-not (Test-Path -LiteralPath $path)) { return New-EmptyManifest }
-  $raw = Get-Content -LiteralPath $path -Raw
-  if ([string]::IsNullOrWhiteSpace($raw)) { return New-EmptyManifest }
-  try {
-    $obj = $raw | ConvertFrom-Json -Depth 64
-  } catch {
-    throw "Invalid manifest JSON at '$path'. Fix the file or remove it to regenerate. $($_.Exception.Message)"
-  }
-  if (-not $obj.PSObject.Properties['packages'])  { $obj | Add-Member -NotePropertyName packages  -NotePropertyValue ([PSCustomObject]@{}) -Force }
-  if (-not $obj.PSObject.Properties['version'])   { $obj | Add-Member -NotePropertyName version   -NotePropertyValue 1 -Force }
-  if (-not $obj.PSObject.Properties['createdAt']) { $obj | Add-Member -NotePropertyName createdAt -NotePropertyValue (Get-Date -Format 'o') -Force }
-  if (-not $obj.PSObject.Properties['updatedAt']) { $obj | Add-Member -NotePropertyName updatedAt -NotePropertyValue (Get-Date -Format 'o') -Force }
-
-  foreach ($prop in $obj.packages.PSObject.Properties) {
-    $pkg = $prop.Value
-    if (-not $pkg) { continue }
-
-    if (-not $pkg.PSObject.Properties['id']) {
-      $pkg | Add-Member -NotePropertyName id -NotePropertyValue $prop.Name -Force
-    } else {
-      $pkg.id = $prop.Name
-    }
-
-    if (-not $pkg.PSObject.Properties['display']) {
-      $pkg | Add-Member -NotePropertyName display -NotePropertyValue $prop.Name -Force
-    } else {
-      $pkg.display = $prop.Name
-    }
-
-    if (-not $pkg.PSObject.Properties['branch']) {
-      $pkg | Add-Member -NotePropertyName branch -NotePropertyValue 'main' -Force
-    }
-  }
-
-  $obj
-}
-
-function Export-Manifest([object]$Manifest) {
-  $Manifest.updatedAt = (Get-Date -Format 'o')
-  $path = Get-ManifestPath; $tmp = "$path.tmp"
-  ($Manifest | ConvertTo-Json -Depth 64) | Set-Content -LiteralPath $tmp -Encoding UTF8
-  Move-Item -LiteralPath $tmp -Destination $path -Force
-}
-
-function Get-PackageIds([object]$Manifest) {
-  $list = [System.Collections.Generic.List[string]]::new()
-  foreach ($prop in $Manifest.packages.PSObject.Properties) { $list.Add($prop.Name) }
-  $list.Sort()
-  Write-Output -NoEnumerate ([string[]]$list)
-}
-
-function Get-PackageEntry([object]$Manifest, [string]$Id) {
-  $Manifest.packages.PSObject.Properties[$Id]?.Value
-}
-
-function Show-Help {
-  @"
-gitpkg - git-backed package manager (PowerShell)
-
-Roots:
-  Repos:     ~/gitpkgs
-  Manifest:  ~/.config/gitpkg/manifest.json
-
-Commands:
-  clone   <spec>           Install (clone) a repo package  (or: gitpkg <spec>)
-  pull    [spec|all]       No arg: show update status table
-                           spec:   update one package
-                           all:    update all packages
-  rm      <spec>           Uninstall a package
-          [keep]     Remove from manifest only, keep files on disk
-  list                     List installed packages
-  export  [path]           Export package list to JSON (stdout if no path)
-  import  <path>           Install all packages from an export file
-  Help                     Show this help
-
-Flags:
-  -Quiet                        Suppress informational output messages
-  -StatusCheckThrottle <1..32>  Max parallel workers for "pull" status checks (default 6)
-                                Applies when running "pull" with no target
-  -NoParallelStatus             Disable parallel status checks for "pull" with no target
-
-Specs:
-  host:namespace/repo[@branch]
-  https://host/namespace/.../repo(.git)[@branch]
-  ssh://user@host/namespace/.../repo(.git)[@branch]
-  git@host:namespace/.../repo(.git)[@branch]
-
-Examples:
-  .\gitpkg.ps1 clone  github.com:BurntSushi/ripgrep
-  .\gitpkg.ps1 clone  github.com:BurntSushi/ripgrep@develop
-  .\gitpkg.ps1 clone  gitlab.com:group/subgroup/tool
-  .\gitpkg.ps1 clone  https://codeberg.org/org/subgroup/repo.git
-  .\gitpkg.ps1 clone  ssh://git@gitlab.com/group/subgroup/repo.git@stable
-  .\gitpkg.ps1 pull
-  .\gitpkg.ps1 pull all
-  .\gitpkg.ps1 pull github.com:BurntSushi/ripgrep
-  .\gitpkg.ps1 Pull -Quiet
-  .\gitpkg.ps1 Pull -StatusCheckThrottle 12
-  .\gitpkg.ps1 Pull -NoParallelStatus
-  .\gitpkg.ps1 rm    github.com:BurntSushi/ripgrep
-  .\gitpkg.ps1 list
-  .\gitpkg.ps1 export .\gitpkg.json
-  .\gitpkg.ps1 import .\gitpkg.json
-"@ | Write-Host
-}
-
-function Get-GitpkgPackage {
-  $m = Import-Manifest; $ids = Get-PackageIds $m
-  if ($ids.Count -eq 0) { Write-Info 'No packages installed.'; return }
-  $repoRoot = Get-RepoRoot
-  $rows = foreach ($id in $ids) {
-    $p   = Get-PackageEntry $m $id
-    $dir = Get-PackageDir -RepoRoot $repoRoot -DirName $p.dir
-    $branch = if ($p | Get-Member branch) { $p.branch } else { 'main' }
-    [PSCustomObject]@{
-      Package = if ($p.id) { $p.id } else { $id }
-      Status  = (Test-Path -LiteralPath $dir) ? 'ok' : 'missing'
-      URL     = $p.url
-      Branch  = $branch
-    }
-  }
-  $rows | Format-Table -AutoSize
-}
-
-function Add-GitpkgPackage([string]$Spec, [object]$Manifest = $null, [switch]$SkipSave) {
-  if ([string]::IsNullOrWhiteSpace($Spec)) { throw 'Clone requires a repo spec.' }
-  $repoRoot = Get-RepoRoot; Ensure-Dir $repoRoot
-  $m = if ($null -ne $Manifest) { $Manifest } else { Import-Manifest }
-  $pkg = ConvertTo-PackageSpec -Spec $Spec; $id = $pkg.Id; $branch = $pkg.Branch
-
-  if (Get-PackageEntry $m $id) { Write-Warn "Already installed: $id"; return }
-
-  $dirName = Get-DirName -Id "$($pkg.Host):$($pkg.Path)" -Branch $branch
-  $dirPath = Get-PackageDir -RepoRoot $repoRoot -DirName $dirName
-
-  if (Test-Path -LiteralPath $dirPath) {
-    if (Test-GitRepo -Dir $dirPath) {
-      Write-Warn "Directory already exists as a git repo; recording in manifest: $dirPath"
-      try {
-        $origin = (Invoke-Git -GitArgs @('remote','get-url','origin') -WorkingDir $dirPath).Stdout.Trim()
-        if (-not [string]::IsNullOrWhiteSpace($origin)) { $pkg.Url = $origin }
-      } catch { }
-    } else { throw "Target path exists but is not a git repo: $dirPath" }
-  } else {
-    Write-Info "Cloning $($pkg.Url) -> $dirPath (branch: $branch)"
-    Invoke-Git -GitArgs @('clone', '--branch', $branch, $pkg.Url, $dirPath) | Out-Null
-  }
-
-  $m.packages | Add-Member -NotePropertyName $id -NotePropertyValue ([PSCustomObject]@{
-    id = $id; display = $id; url = $pkg.Url; branch = $branch
-    dir = $dirName; installed = (Get-Date -Format 'o')
-  }) -Force
-  if (-not $SkipSave) { Export-Manifest $m }
-  Write-Info "Installed: $id"
-}
-
-function Update-OnePackage([string]$Id, [object]$Manifest = $null, [string]$RepoRoot = $null) {
-  $m = if ($null -ne $Manifest) { $Manifest } else { Import-Manifest }
-  $p = Get-PackageEntry $m $Id
-  if (-not $p) { throw "Package not found in manifest: $Id" }
-  $repoRoot = if ([string]::IsNullOrWhiteSpace($RepoRoot)) { Get-RepoRoot } else { $RepoRoot }
-  Ensure-Dir $repoRoot
-  $branch = if ($p | Get-Member branch) { $p.branch } else { 'main' }
-  $dir = Get-PackageDir -RepoRoot $repoRoot -DirName $p.dir
-
-  if (-not (Test-Path -LiteralPath $dir)) {
-    Write-Warn "Directory missing for '$Id'; re-cloning."
-    Invoke-Git -GitArgs @('clone', '--branch', $branch, $p.url, $dir) | Out-Null
-    return 'updated'
-  }
-  if (-not (Test-GitRepo -Dir $dir)) { throw "Not a git repo for '${Id}': $dir" }
-  Write-Info "Updating $Id..."
-  $before = (Invoke-Git -GitArgs @('rev-parse', 'HEAD') -WorkingDir $dir).Stdout.Trim()
-  Invoke-Git -GitArgs @('pull', '--ff-only') -WorkingDir $dir | Out-Null
-  $after  = (Invoke-Git -GitArgs @('rev-parse', 'HEAD') -WorkingDir $dir).Stdout.Trim()
-  if ($before -ne $after) { 'updated' } else { 'latest' }
-}
-
-function Get-PackageUpdateStatus([string]$Id, [object]$Manifest, [string]$RepoRoot) {
-  $p = Get-PackageEntry $Manifest $Id
-  if (-not $p) { return [PSCustomObject]@{ Package=$Id; Status='not in manifest'; Behind=''; Reason='' } }
-
-  $display = if ($p.id) { $p.id } else { $Id }
-  $dir     = Get-PackageDir -RepoRoot $RepoRoot -DirName $p.dir
-
-  if (-not (Test-Path -LiteralPath $dir) -or -not (Test-GitRepo -Dir $dir)) {
-    return [PSCustomObject]@{ Package=$display; Status='missing'; Behind=''; Reason='' }
-  }
-
-  try {
-    Invoke-Git -GitArgs @('fetch', '--quiet') -WorkingDir $dir | Out-Null
-    $statusOut = (Invoke-Git -GitArgs @('status', '--porcelain=v2', '--branch') -WorkingDir $dir).Stdout
-    $upstreamLine = (($statusOut -split "`r?`n") | Where-Object { $_ -like '# branch.upstream *' } | Select-Object -First 1)
-    if (-not $upstreamLine) {
-      return [PSCustomObject]@{ Package=$display; Status='error'; Behind=''; Reason='no upstream branch configured' }
-    }
-
-    $abLine = (($statusOut -split "`r?`n") | Where-Object { $_ -like '# branch.ab *' } | Select-Object -First 1)
-    $behindCount = 0
-    if ($abLine -and $abLine -match '# branch\.ab \+[0-9]+ -(?<behind>[0-9]+)') {
-      $behindCount = [int]$Matches.behind
-    }
-    $available = ($behindCount -gt 0)
-
-    [PSCustomObject]@{
-      Package = $display
-      Status  = if ($available) { 'update available' } else { 'up-to-date' }
-      Behind  = if ($available) { "$behindCount commit$(if ($behindCount -ne 1) {'s'})" } else { '' }
-      Reason  = ''
-    }
-  } catch {
-    $msg = $_.Exception.Message
-    $reason = if ($msg -match 'HEAD\.\.@\{u\}|no upstream configured|no upstream branch') {
-      'no upstream branch configured'
-    } elseif ($msg -match 'Authentication failed|Permission denied|Could not read from remote repository') {
-      'authentication/permission failure'
-    } else {
-      ($msg -split "`r?`n")[0]
-    }
-
-    [PSCustomObject]@{ Package=$display; Status='error'; Behind=''; Reason=$reason }
-  }
-}
-
-function Update-GitpkgPackage([string]$Target) {
-  $m = Import-Manifest; $ids = Get-PackageIds $m; $repoRoot = Get-RepoRoot
-
-  if ([string]::IsNullOrWhiteSpace($Target)) {
-    if ($ids.Count -eq 0) { Write-Info 'No packages installed.'; return }
-    Write-Info 'Checking for updates...'
-
-    $workItems = foreach ($id in $ids) {
-      $p = Get-PackageEntry $m $id
-      [PSCustomObject]@{
-        Id      = $id
-        Package = if ($p.id) { $p.id } else { $id }
-        Dir     = Get-PackageDir -RepoRoot $repoRoot -DirName $p.dir
-      }
-    }
-
-    $parallelSupported = (($PSVersionTable.PSVersion.Major -ge 7) -and (-not $NoParallelStatus))
-    if ($parallelSupported) {
-      $rows = $workItems | ForEach-Object -ThrottleLimit $StatusCheckThrottle -Parallel {
-        $display = $_.Package
-        $dir = $_.Dir
-
-        if (-not (Test-Path -LiteralPath $dir) -or -not (Test-Path -LiteralPath (Join-Path $dir '.git'))) {
-          return [PSCustomObject]@{ Package=$display; Status='missing'; Behind=''; Reason='' }
+switch ($Command) {
+    'clone' {
+        if (-not $Target) { 
+            Write-Host "Error: URL required for clone. Usage: gitpkg clone <url>" -ForegroundColor Red
+            exit 1 
+        }
+        
+        if (-not $Name) { 
+            $Name = ($Target -split '[:/]')[-1] -replace '\.git$','' 
         }
 
-        try {
-          & git -C $dir fetch --quiet 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            throw 'git fetch failed.'
-          }
-
-          $statusOut = & git -C $dir status --porcelain=v2 --branch 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            throw (($statusOut | Out-String).Trim())
-          }
-
-          $statusText = ($statusOut | Out-String)
-          $upstreamLine = (($statusText -split "`r?`n") | Where-Object { $_ -like '# branch.upstream *' } | Select-Object -First 1)
-          if (-not $upstreamLine) {
-            return [PSCustomObject]@{ Package=$display; Status='error'; Behind=''; Reason='no upstream branch configured' }
-          }
-
-          $abLine = (($statusText -split "`r?`n") | Where-Object { $_ -like '# branch.ab *' } | Select-Object -First 1)
-          $behindCount = 0
-          if ($abLine -and $abLine -match '# branch\.ab \+[0-9]+ -(?<behind>[0-9]+)') {
-            $behindCount = [int]$Matches.behind
-          }
-          $available = ($behindCount -gt 0)
-
-          [PSCustomObject]@{
-            Package = $display
-            Status  = if ($available) { 'update available' } else { 'up-to-date' }
-            Behind  = if ($available) { "$behindCount commit$(if ($behindCount -ne 1) {'s'})" } else { '' }
-            Reason  = ''
-          }
-        } catch {
-          $msg = $_.Exception.Message
-          $reason = if ($msg -match 'no upstream configured|no upstream branch|branch\.upstream') {
-            'no upstream branch configured'
-          } elseif ($msg -match 'Authentication failed|Permission denied|Could not read from remote repository') {
-            'authentication/permission failure'
-          } else {
-            ($msg -split "`r?`n")[0]
-          }
-
-          [PSCustomObject]@{ Package=$display; Status='error'; Behind=''; Reason=$reason }
+        if ([string]::IsNullOrWhiteSpace($Branch)) {
+            Write-Host "Detecting default branch for $Name..." -ForegroundColor DarkGray
+            $Branch = Get-RemoteDefaultBranch -Url $Target
+            Write-Host "Detected default branch: " -NoNewline; Write-Host $Branch -ForegroundColor Yellow
         }
-      }
-    } else {
-      $rows = foreach ($id in $ids) { Get-PackageUpdateStatus -Id $id -Manifest $m -RepoRoot $repoRoot }
+
+        if ($Target -match '^(?:https?://|ssh://)?(?:git@)?([^/:]+)[/:](.+?)(?:\.git)?$') {
+            $Domain = $matches[1]
+            $RepoPath = $matches[2]
+        } else {
+            Write-Host "Error: Could not parse URL properly. Ensure it is a valid Git or SSH URL." -ForegroundColor Red
+            exit 1
+        }
+
+        $FormattedId = "{0}:{1}@{2}" -f $Domain, $RepoPath, $Branch
+        $ShortHash = Get-ShortHash -InputString $FormattedId
+        $DirName = "{0}@{1}-{2}" -f $Name, $Branch, $ShortHash
+        
+        [array]$Packages = Get-Packages
+        if ($Packages.Id -contains $FormattedId) { 
+            Write-Host "Repository '$FormattedId' is already cloned and tracked." -ForegroundColor Yellow
+            exit 0 
+        }
+
+        $TargetPath = Join-Path $InstallDir $DirName
+
+        if (Test-Path $TargetPath) {
+            Write-Host "Error: The directory '$DirName' already exists on disk but is not tracked." -ForegroundColor Red
+            Write-Host "Clean it up by running: Remove-Item -Recurse -Force `"$TargetPath`"" -ForegroundColor Yellow
+            exit 1
+        }
+
+        $gitArgs = @("clone", "--depth", "1", $Target, $TargetPath, "--branch", $Branch)
+
+        Write-Host "==> Cloning $FormattedId..." -ForegroundColor Cyan
+        & git @gitArgs
+
+        if ($LASTEXITCODE -eq 0) {
+            $newPkg = [PSCustomObject]@{
+                Id = $FormattedId
+                Name = $Name
+                Hash = $ShortHash
+                Url = $Target
+                Branch = $Branch
+                Path = $TargetPath
+            }
+            $Packages += $newPkg
+            Save-Packages $Packages
+            Write-Host "Successfully cloned to '$DirName'." -ForegroundColor Green
+        } else {
+            Write-Host "Failed to clone '$Name'. Please check your network or SSH keys." -ForegroundColor Red
+        }
     }
 
-    $rows | Sort-Object Package | Format-Table -AutoSize
-    return
-  }
+    'pull' {
+        [array]$Packages = Get-Packages
+        if ($Packages.Count -eq 0) {
+            Write-Host "No repositories tracked." -ForegroundColor Yellow
+            exit 0
+        }
 
-  if ($Target -ieq 'all') {
-    if ($ids.Count -eq 0) { Write-Info 'No packages installed.'; return }
-    $failCount = 0
-    foreach ($id in $ids) {
-      try   { Update-OnePackage -Id $id -Manifest $m -RepoRoot $repoRoot | Out-Null }
-      catch { $failCount++; Write-Err "Failed [$id]: $($_.Exception.Message)" }
+        if (-not $Target) {
+            Write-Host "Fetching origin data for all repositories to check status..." -ForegroundColor Cyan
+            $StatusList = @()
+
+            foreach ($pkg in $Packages) {
+                if (Test-Path $pkg.Path) {
+                    Push-Location $pkg.Path
+                    & git fetch --quiet 2>$null
+                    
+                    $behindCount = 0
+                    $isBehind = $false
+                    try {
+                        $output = & git rev-list --count HEAD..@{u} 2>$null
+                        if ($output) {
+                            $behindCount = [int]$output
+                            if ($behindCount -gt 0) { $isBehind = $true }
+                        }
+                    } catch { }
+
+                    $statusMsg = if ($isBehind) { "$behindCount commits behind" } else { "Up to date" }
+                    
+                    $StatusList += [PSCustomObject]@{
+                        Name = $pkg.Name
+                        Status = $statusMsg
+                        Id = $pkg.Id
+                        NeedsAction = $isBehind
+                    }
+                    Pop-Location
+                } else {
+                    $StatusList += [PSCustomObject]@{
+                        Name = $pkg.Name
+                        Status = "Missing"
+                        Id = $pkg.Id
+                        NeedsAction = $true
+                    }
+                }
+            }
+
+            Write-Host "`nRepository Status:"
+            $StatusList | Format-Table Name, Status, Id -AutoSize
+
+            $actionsAvailable = $StatusList | Where-Object { $_.NeedsAction -eq $true }
+            if ($actionsAvailable.Count -gt 0) {
+                Write-Host "$($actionsAvailable.Count) repositories need updates or restoration." -ForegroundColor Green
+                Write-Host "Run 'gitpkg pull all' to apply them, or 'gitpkg pull <name>' for a specific one.`n"
+            } else {
+                Write-Host "All repositories are up to date and present.`n" -ForegroundColor Green
+            }
+            exit 0
+        }
+
+        [array]$ReposToPull = @()
+        
+        if ($Target -eq "all") {
+            $ReposToPull = $Packages
+        } else {
+            $ReposToPull = $Packages | Where-Object { $_.Name -eq $Target -or $_.Id -eq $Target -or $_.Hash -eq $Target }
+            
+            if ($ReposToPull.Count -eq 0) {
+                Write-Host "Repository '$Target' not found." -ForegroundColor Yellow
+                exit 1
+            }
+
+            if ($ReposToPull.Count -gt 1 -and $Target -eq $ReposToPull[0].Name) {
+                Write-Host "`nMultiple repositories match '$Target'. Which one would you like to pull?" -ForegroundColor Yellow
+                for ($i = 0; $i -lt $ReposToPull.Count; $i++) { Write-Host "  [$($i + 1)] $($ReposToPull[$i].Id)" }
+                Write-Host "  [0] Cancel`n"
+
+                $choice = Read-Host "Enter number"
+                if ($choice -eq '0') { exit 0 } 
+                elseif ($choice -match '^\d+$' -and [int]$choice -gt 0 -and [int]$choice -le $ReposToPull.Count) {
+                    $ReposToPull = @($ReposToPull[[int]$choice - 1])
+                } else { exit 1 }
+            }
+        }
+
+        foreach ($pkg in $ReposToPull) {
+            if (Test-Path $pkg.Path) {
+                Write-Host "==> Pulling $($pkg.Id)..." -ForegroundColor Cyan
+                Push-Location $pkg.Path
+                & git pull --quiet
+                Pop-Location
+            } else {
+                Write-Host "==> Restoring missing repository $($pkg.Id)..." -ForegroundColor Magenta
+                $gitArgs = @("clone", "--depth", "1", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch)
+                & git @gitArgs
+            }
+        }
+        
+        if ($Target -eq "all") { Write-Host "All repositories processed." -ForegroundColor Green } 
+        else { Write-Host "Successfully processed." -ForegroundColor Green }
     }
-    if ($failCount -gt 0) { throw "Update finished with $failCount failure(s)." }
-    return
-  }
 
-  $id = (ConvertTo-PackageSpec -Spec $Target).Id
-  $status = Update-OnePackage -Id $id -Manifest $m -RepoRoot $repoRoot
-  if ($status -eq 'updated') { Write-Info "Updated: $id" } else { Write-Info "Already latest: $id" }
-}
-
-function Remove-GitpkgPackage([string]$Spec, [switch]$KeepFiles) {
-  if ([string]::IsNullOrWhiteSpace($Spec)) { throw 'Remove requires a repo spec.' }
-  $id = (ConvertTo-PackageSpec -Spec $Spec).Id
-  $m  = Import-Manifest; $p = Get-PackageEntry $m $id
-  if (-not $p) { Write-Warn "Not found in manifest: $id"; return }
-
-  $repoRoot = Get-RepoRoot
-  $dir = Get-PackageDir -RepoRoot $repoRoot -DirName $p.dir
-  Assert-PathUnderRoot -Path $dir -Root $repoRoot -Context "package directory '$id'"
-  if ($KeepFiles) {
-    Write-Info "Keeping files at $dir (manifest only)."
-  } elseif (Test-Path -LiteralPath $dir) {
-    Write-Info "Deleting $dir"
-    Remove-Item -LiteralPath $dir -Recurse -Force
-  }
-  $m.packages.PSObject.Properties.Remove($id)
-  Export-Manifest $m
-  Write-Info "Removed: $id"
-}
-
-function Export-GitpkgPackage([string]$OutPath) {
-  $m = Import-Manifest; $ids = Get-PackageIds $m
-  $doc = [PSCustomObject]@{
-    format = 'gitpkg-export'; version = 1; exportedAt = (Get-Date -Format 'o')
-    packages = @(foreach ($id in $ids) {
-      $p = Get-PackageEntry $m $id
-      [PSCustomObject]@{ id=$p.id; url=$p.url; display=$p.display }
-    })
-  }
-  if ([string]::IsNullOrWhiteSpace($OutPath)) { $doc | ConvertTo-Json -Depth 64; return }
-  $parent = Split-Path -Parent $OutPath
-  if (-not [string]::IsNullOrWhiteSpace($parent)) { Ensure-Dir $parent }
-  $doc | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath $OutPath -Encoding UTF8
-  Write-Info "Exported $($ids.Count) package(s) to $OutPath"
-}
-
-function Import-GitpkgPackage([string]$InPath) {
-  if ([string]::IsNullOrWhiteSpace($InPath)) { throw 'Import requires a path to an export JSON file.' }
-  if (-not (Test-Path -LiteralPath $InPath)) { throw "File not found: $InPath" }
-  try {
-    $obj = Get-Content -LiteralPath $InPath -Raw | ConvertFrom-Json -Depth 64
-  } catch {
-    throw "Invalid import JSON at '$InPath'. Ensure the export file is valid JSON. $($_.Exception.Message)"
-  }
-  if (-not $obj.PSObject.Properties['packages']) { throw "Invalid export file: missing 'packages' field." }
-
-  $m = Import-Manifest
-  $installed = 0; $skipped = 0; $failed = 0
-  foreach ($entry in $obj.packages) {
-    try {
-      if ([string]::IsNullOrWhiteSpace($entry.url)) { throw "Entry is missing 'url'." }
-      $id = (ConvertTo-PackageSpec -Spec $entry.url).Id
-      if (Get-PackageEntry $m $id) { $skipped++; continue }
-      Add-GitpkgPackage -Spec $entry.url -Manifest $m -SkipSave
-      $installed++
-    } catch {
-      $failed++
-      Write-Err "Import failed [$($entry.url)]: $($_.Exception.Message)"
+    'list' {
+        [array]$Packages = Get-Packages
+        if ($Packages.Count -gt 0) {
+            $Packages | Format-Table Name, Branch, Hash, Id -AutoSize
+        } else {
+            Write-Host "No repositories tracked." -ForegroundColor Yellow
+        }
     }
-  }
 
-  if ($installed -gt 0) { Export-Manifest $m }
-  Write-Info "Import complete — installed: $installed  skipped: $skipped  failed: $failed"
-  if ($failed -gt 0) { throw 'Import completed with failures.' }
-}
+    'rm' {
+        if (-not $Target) {
+            Write-Host "Error: Target required. Usage: gitpkg rm <name|id|hash>" -ForegroundColor Red
+            exit 1
+        }
+        
+        [array]$Packages = Get-Packages
+        [array]$pkgToRemove = $Packages | Where-Object { $_.Name -eq $Target -or $_.Id -eq $Target -or $_.Hash -eq $Target }
 
-# ---------- main ----------
+        if ($pkgToRemove.Count -eq 0) {
+            Write-Host "Repository '$Target' not found." -ForegroundColor Yellow
+            exit 1
+        }
 
-try {
-  Assert-GitAvailable
-  if ([string]::IsNullOrWhiteSpace($Command)) { Show-Help; exit 0 }
+        if ($pkgToRemove.Count -gt 1 -and $Target -eq $pkgToRemove[0].Name) {
+            Write-Host "`nMultiple repositories match '$Target'. Which one would you like to remove?" -ForegroundColor Yellow
+            for ($i = 0; $i -lt $pkgToRemove.Count; $i++) { Write-Host "  [$($i + 1)] $($pkgToRemove[$i].Id)" }
+            Write-Host "  [0] Cancel`n"
 
-  switch ($Command.ToLowerInvariant()) {
-    'help'   { Show-Help }
-    'list'   { Get-GitpkgPackage }
-    'clone'  { Add-GitpkgPackage    -Spec $Arg1 }
-    'pull'   { Update-GitpkgPackage -Target $Arg1 }
-    'rm'     { Remove-GitpkgPackage -Spec $Arg1 -KeepFiles:$KeepFiles }
-    'export' { Export-GitpkgPackage -OutPath $Arg1 }
-    'import' { Import-GitpkgPackage -InPath $Arg1 }
-    default  {
-      # Treat bare specs (host:namespace/repo, URLs, git@ URLs) as implicit Clone
-      try   { Add-GitpkgPackage -Spec $Command }
-      catch { throw "Unknown command '$Command'. Run '.\gitpkg.ps1 help' for usage." }
+            $choice = Read-Host "Enter number"
+            if ($choice -eq '0') { exit 0 } 
+            elseif ($choice -match '^\d+$' -and [int]$choice -gt 0 -and [int]$choice -le $pkgToRemove.Count) {
+                $pkgToRemove = @($pkgToRemove[[int]$choice - 1])
+            } else { exit 1 }
+        }
+
+        $TargetPkg = $pkgToRemove[0]
+        Write-Host "==> Removing $($TargetPkg.Id)..." -ForegroundColor Cyan
+        
+        if (Test-Path $TargetPkg.Path) { Remove-Item -Path $TargetPkg.Path -Recurse -Force }
+        
+        $Packages = $Packages | Where-Object { $_.Id -ne $TargetPkg.Id }
+        Save-Packages $Packages
+        Write-Host "Successfully removed." -ForegroundColor Green
     }
-  }
-} catch {
-  Write-Err $_.Exception.Message
-  exit 1
+
+    'export' {
+        $exportPath = if ($Target) { $Target } else { Join-Path (Get-Location) "gitpkg-export.json" }
+        Copy-Item -Path $ConfigFile -Destination $exportPath -Force
+        Write-Host "Successfully exported tracked repositories to:" -ForegroundColor Green
+        Write-Host $exportPath -ForegroundColor Cyan
+    }
+
+    'import' {
+        if (-not $Target -or -not (Test-Path $Target)) {
+            Write-Host "Error: Please provide a valid path to a JSON file. Usage: gitpkg import <file.json>" -ForegroundColor Red
+            exit 1
+        }
+
+        $importedData = Get-Content $Target -Raw | ConvertFrom-Json
+        [array]$currentPackages = Get-Packages
+        $addedCount = 0
+
+        foreach ($pkg in $importedData) {
+            if ($currentPackages.Id -notcontains $pkg.Id) {
+                $currentPackages += $pkg
+                $addedCount++
+            }
+        }
+
+        Save-Packages $currentPackages
+        Write-Host "Imported $addedCount new repositories from $Target." -ForegroundColor Green
+        if ($addedCount -gt 0) {
+            Write-Host "Run 'gitpkg pull all' to physically download the missing directories." -ForegroundColor Yellow
+        }
+    }
 }
