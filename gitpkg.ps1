@@ -122,7 +122,7 @@ function Format-SafeFsName([string]$s) {
 }
 
 function Get-DirName([string]$Id, [string]$Branch = 'main') {
-  Format-SafeFsName ($Id.Replace(':', '@').Replace('/', '@') + "@$Branch")
+  Format-SafeFsName ($Id.Replace(':', '_').Replace('/', '_') + "_$Branch")
 }
 
 function Format-PathPart([string]$p) {
