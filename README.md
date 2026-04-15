@@ -78,6 +78,28 @@ You can remove by name, exact ID, or hash. If multiple packages share the same n
 gitpkg rm uosc
 ```
 
+### Freeze & Unfreeze Packages
+Prevent specific repositories from being updated during `gitpkg pull`. Frozen packages are automatically skipped during dry-runs and live pulls.
+
+```powershell
+# Freeze a package
+gitpkg freeze uosc
+
+# Unfreeze it later
+gitpkg unfreeze uosc
+```
+
+### Git History
+By default, gitpkg clones and pulls using --depth 1 (shallow). If you need full commit history switch to deep mode.
+
+```powershell
+# Fetch full git history on next pull
+gitpkg deep uosc
+
+# Revert back to shallow cloning
+gitpkg shallow uosc
+```
+
 ### Sync across machines
 Export your current configuration to a JSON file:
 ```powershell
