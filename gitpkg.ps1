@@ -25,6 +25,8 @@ if (-not (Test-Path $ConfigDir)) { New-Item -ItemType Directory -Path $ConfigDir
 if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir | Out-Null }
 if (-not (Test-Path $ConfigFile)) { Set-Content -Path $ConfigFile -Value "[]" }
 
+# --- HELPER FUNCTIONS ---
+
 function Get-Packages {
     $content = Get-Content $ConfigFile -Raw
     if ([string]::IsNullOrWhiteSpace($content) -or $content -eq '[]') { return @() }
@@ -58,6 +60,29 @@ function Get-RemoteDefaultBranch {
     return "master" 
 }
 
+function Resolve-AmbiguousPackage {
+    param([array]$Matches, [string]$TargetName, [string]$ActionName)
+    
+    Write-Host "`nMultiple repositories match '$TargetName'. Which one would you like to $ActionName?" -ForegroundColor Yellow
+    for ($i = 0; $i -lt $Matches.Count; $i++) { 
+        Write-Host "  [$($i + 1)] $($Matches[$i].Id)" 
+    }
+    Write-Host "  [0] Cancel`n"
+
+    $choice = Read-Host "Enter number"
+    if ($choice -eq '0') { 
+        Write-Host "Operation cancelled." -ForegroundColor Yellow
+        exit 0 
+    } elseif ($choice -match '^\d+$' -and [int]$choice -gt 0 -and [int]$choice -le $Matches.Count) {
+        return @($Matches[[int]$choice - 1])
+    } else { 
+        Write-Host "Invalid choice. Exiting." -ForegroundColor Red
+        exit 1 
+    }
+}
+
+# --- MAIN LOGIC ---
+
 switch ($Command) {
     'clone' {
         if (-not $Target) { 
@@ -65,21 +90,21 @@ switch ($Command) {
             exit 1 
         }
         
-        if (-not $Name) { 
-            $Name = ($Target -split '[:/]')[-1] -replace '\.git$','' 
-        }
+        $CleanTarget = $Target.TrimEnd('/')
+        
+        if (-not $Name) { $Name = ($CleanTarget -split '[:/]')[-1] -replace '\.git$','' }
 
         if ([string]::IsNullOrWhiteSpace($Branch)) {
             Write-Host "Detecting default branch for $Name..." -ForegroundColor DarkGray
-            $Branch = Get-RemoteDefaultBranch -Url $Target
+            $Branch = Get-RemoteDefaultBranch -Url $CleanTarget
             Write-Host "Detected default branch: " -NoNewline; Write-Host $Branch -ForegroundColor Yellow
         }
 
-        if ($Target -match '^(?:https?://|ssh://)?(?:git@)?([^/:]+)[/:](.+?)(?:\.git)?$') {
+        if ($CleanTarget -match '^(?:https?://|ssh://)?(?:git@)?([^/:]+)[/:](.+?)(?:\.git)?$') {
             $Domain = $matches[1]
             $RepoPath = $matches[2]
         } else {
-            Write-Host "Error: Could not parse URL properly. Ensure it is a valid Git or SSH URL." -ForegroundColor Red
+            Write-Host "Error: Could not parse URL properly." -ForegroundColor Red
             exit 1
         }
 
@@ -96,12 +121,12 @@ switch ($Command) {
         $TargetPath = Join-Path $InstallDir $DirName
 
         if (Test-Path $TargetPath) {
-            Write-Host "Error: The directory '$DirName' already exists on disk but is not tracked." -ForegroundColor Red
-            Write-Host "Clean it up by running: Remove-Item -Recurse -Force `"$TargetPath`"" -ForegroundColor Yellow
+            Write-Host "Error: Directory '$DirName' exists but is untracked." -ForegroundColor Red
+            Write-Host "Clean it up: Remove-Item -Recurse -Force `"$TargetPath`"" -ForegroundColor Yellow
             exit 1
         }
 
-        $gitArgs = @("clone", "--depth", "1", $Target, $TargetPath, "--branch", $Branch)
+        $gitArgs = @("clone", "--depth", "1", $CleanTarget, $TargetPath, "--branch", $Branch)
 
         Write-Host "==> Cloning $FormattedId..." -ForegroundColor Cyan
         & git @gitArgs
@@ -111,7 +136,7 @@ switch ($Command) {
                 Id = $FormattedId
                 Name = $Name
                 Hash = $ShortHash
-                Url = $Target
+                Url = $CleanTarget
                 Branch = $Branch
                 Path = $TargetPath
             }
@@ -119,7 +144,7 @@ switch ($Command) {
             Save-Packages $Packages
             Write-Host "Successfully cloned to '$DirName'." -ForegroundColor Green
         } else {
-            Write-Host "Failed to clone '$Name'. Please check your network or SSH keys." -ForegroundColor Red
+            Write-Host "Failed to clone '$Name'. Check network or SSH keys." -ForegroundColor Red
         }
     }
 
@@ -131,26 +156,32 @@ switch ($Command) {
         }
 
         if (-not $Target) {
-            Write-Host "Fetching origin data for all repositories to check status..." -ForegroundColor Cyan
+            Write-Host "Checking remote servers for updates..." -ForegroundColor Cyan
             $StatusList = @()
 
             foreach ($pkg in $Packages) {
                 if (Test-Path $pkg.Path) {
                     Push-Location $pkg.Path
-                    & git fetch --quiet 2>$null
-                    
-                    $behindCount = 0
                     $isBehind = $false
-                    try {
-                        $output = & git rev-list --count HEAD..@{u} 2>$null
-                        if ($output) {
-                            $behindCount = [int]$output
-                            if ($behindCount -gt 0) { $isBehind = $true }
-                        }
-                    } catch { }
-
-                    $statusMsg = if ($isBehind) { "$behindCount commits behind" } else { "Up to date" }
+                    $statusMsg = "Up to date"
                     
+                    try {
+                        $localHash = & git rev-parse HEAD 2>$null
+                        $remoteOutput = & git ls-remote $pkg.Url "refs/heads/$($pkg.Branch)" 2>$null
+                        
+                        if ($remoteOutput) {
+                            $remoteHash = ($remoteOutput -split '\s+')[0]
+                            if ($localHash -and $remoteHash -and ($localHash -ne $remoteHash)) {
+                                $isBehind = $true
+                                $statusMsg = "Update available"
+                            }
+                        } else {
+                            $statusMsg = "Error reaching remote"
+                        }
+                    } catch { 
+                        $statusMsg = "Error checking status"
+                    }
+
                     $StatusList += [PSCustomObject]@{
                         Name = $pkg.Name
                         Status = $statusMsg
@@ -161,7 +192,7 @@ switch ($Command) {
                 } else {
                     $StatusList += [PSCustomObject]@{
                         Name = $pkg.Name
-                        Status = "Missing"
+                        Status = "Missing (Will restore)"
                         Id = $pkg.Id
                         NeedsAction = $true
                     }
@@ -181,36 +212,31 @@ switch ($Command) {
             exit 0
         }
 
-        [array]$ReposToPull = @()
+        [array]$MatchedPackages = @()
         
         if ($Target -eq "all") {
-            $ReposToPull = $Packages
+            $MatchedPackages = $Packages
         } else {
-            $ReposToPull = $Packages | Where-Object { $_.Name -eq $Target -or $_.Id -eq $Target -or $_.Hash -eq $Target }
+            $MatchedPackages = $Packages | Where-Object { $_.Name -eq $Target -or $_.Id -eq $Target -or $_.Hash -eq $Target }
             
-            if ($ReposToPull.Count -eq 0) {
+            if ($MatchedPackages.Count -eq 0) {
                 Write-Host "Repository '$Target' not found." -ForegroundColor Yellow
                 exit 1
             }
 
-            if ($ReposToPull.Count -gt 1 -and $Target -eq $ReposToPull[0].Name) {
-                Write-Host "`nMultiple repositories match '$Target'. Which one would you like to pull?" -ForegroundColor Yellow
-                for ($i = 0; $i -lt $ReposToPull.Count; $i++) { Write-Host "  [$($i + 1)] $($ReposToPull[$i].Id)" }
-                Write-Host "  [0] Cancel`n"
-
-                $choice = Read-Host "Enter number"
-                if ($choice -eq '0') { exit 0 } 
-                elseif ($choice -match '^\d+$' -and [int]$choice -gt 0 -and [int]$choice -le $ReposToPull.Count) {
-                    $ReposToPull = @($ReposToPull[[int]$choice - 1])
-                } else { exit 1 }
+            if ($MatchedPackages.Count -gt 1 -and $Target -eq $MatchedPackages[0].Name) {
+                $MatchedPackages = Resolve-AmbiguousPackage -Matches $MatchedPackages -TargetName $Target -ActionName "pull"
             }
         }
 
-        foreach ($pkg in $ReposToPull) {
+        foreach ($pkg in $MatchedPackages) {
             if (Test-Path $pkg.Path) {
-                Write-Host "==> Pulling $($pkg.Id)..." -ForegroundColor Cyan
+                Write-Host "==> Updating $($pkg.Id)..." -ForegroundColor Cyan
                 Push-Location $pkg.Path
-                & git pull --quiet
+                
+                & git fetch origin $pkg.Branch --depth 1 --quiet
+                & git reset --hard origin/$($pkg.Branch) --quiet
+                
                 Pop-Location
             } else {
                 Write-Host "==> Restoring missing repository $($pkg.Id)..." -ForegroundColor Magenta
@@ -239,26 +265,18 @@ switch ($Command) {
         }
         
         [array]$Packages = Get-Packages
-        [array]$pkgToRemove = $Packages | Where-Object { $_.Name -eq $Target -or $_.Id -eq $Target -or $_.Hash -eq $Target }
+        [array]$MatchedPackages = $Packages | Where-Object { $_.Name -eq $Target -or $_.Id -eq $Target -or $_.Hash -eq $Target }
 
-        if ($pkgToRemove.Count -eq 0) {
+        if ($MatchedPackages.Count -eq 0) {
             Write-Host "Repository '$Target' not found." -ForegroundColor Yellow
             exit 1
         }
 
-        if ($pkgToRemove.Count -gt 1 -and $Target -eq $pkgToRemove[0].Name) {
-            Write-Host "`nMultiple repositories match '$Target'. Which one would you like to remove?" -ForegroundColor Yellow
-            for ($i = 0; $i -lt $pkgToRemove.Count; $i++) { Write-Host "  [$($i + 1)] $($pkgToRemove[$i].Id)" }
-            Write-Host "  [0] Cancel`n"
-
-            $choice = Read-Host "Enter number"
-            if ($choice -eq '0') { exit 0 } 
-            elseif ($choice -match '^\d+$' -and [int]$choice -gt 0 -and [int]$choice -le $pkgToRemove.Count) {
-                $pkgToRemove = @($pkgToRemove[[int]$choice - 1])
-            } else { exit 1 }
+        if ($MatchedPackages.Count -gt 1 -and $Target -eq $MatchedPackages[0].Name) {
+            $MatchedPackages = Resolve-AmbiguousPackage -Matches $MatchedPackages -TargetName $Target -ActionName "remove"
         }
 
-        $TargetPkg = $pkgToRemove[0]
+        $TargetPkg = $MatchedPackages[0]
         Write-Host "==> Removing $($TargetPkg.Id)..." -ForegroundColor Cyan
         
         if (Test-Path $TargetPkg.Path) { Remove-Item -Path $TargetPkg.Path -Recurse -Force }
@@ -285,8 +303,10 @@ switch ($Command) {
         [array]$currentPackages = Get-Packages
         $addedCount = 0
 
+        $existingIds = $currentPackages | Select-Object -ExpandProperty Id
+
         foreach ($pkg in $importedData) {
-            if ($currentPackages.Id -notcontains $pkg.Id) {
+            if (-not $existingIds -or $existingIds -notcontains $pkg.Id) {
                 $currentPackages += $pkg
                 $addedCount++
             }
