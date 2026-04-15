@@ -22,6 +22,8 @@ if (-not (Test-Path $ConfigDir)) { New-Item -ItemType Directory -Path $ConfigDir
 if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir | Out-Null }
 if (-not (Test-Path $ConfigFile)) { Set-Content -Path $ConfigFile -Value "[]" }
 
+# --- HELPER FUNCTIONS ---
+
 function Get-Packages {
     $content = Get-Content $ConfigFile -Raw
     if ([string]::IsNullOrWhiteSpace($content) -or $content -eq '[]') { return @() }
@@ -46,12 +48,20 @@ function Get-ShortHash {
     return $hex.Substring(0, 8).ToLower()
 }
 
+function Run-GitSilent {
+    param([string[]]$ArgsList)
+    $null = & git @ArgsList 2>&1
+    return $LASTEXITCODE
+}
+
 function Get-RemoteDefaultBranch {
     param([string]$Url)
     try {
-        $output = & git ls-remote --symref $Url HEAD
-        $outputString = $output -join "`n"
-        if ($outputString -match 'ref: refs/heads/([^\s]+)\s+HEAD') { return $matches[1] }
+        if ((Run-GitSilent @("ls-remote", "--symref", $Url, "HEAD")) -eq 0) {
+            $output = & git ls-remote --symref $Url HEAD 2>&1
+            $outputString = $output -join "`n"
+            if ($outputString -match 'ref: refs/heads/([^\s]+)\s+HEAD') { return $matches[1] }
+        }
     }
     catch {}
     return "master"
@@ -79,6 +89,8 @@ function Resolve-AmbiguousPackage {
         exit 1
     }
 }
+
+# --- MAIN LOGIC ---
 
 switch ($Command) {
     'clone' {
@@ -121,9 +133,9 @@ switch ($Command) {
             exit 1
         }
 
-        $gitArgs = @("clone", "--depth", "1", $CleanTarget, $TargetPath, "--branch", $Branch)
+        $gitArgs = @("clone", "--progress", "--depth", "1", $CleanTarget, $TargetPath, "--branch", $Branch)
         Write-Host "== > Cloning $FormattedId... " -ForegroundColor Cyan
-        & git @gitArgs
+        & git @gitArgs 1>$null
 
         if ($LASTEXITCODE -eq 0) {
             $newPkg = [PSCustomObject]@{
@@ -141,7 +153,7 @@ switch ($Command) {
             Write-Host "Successfully cloned to '$DirName'." -ForegroundColor Green
         }
         else {
-            Write-Host "Failed to clone '$Name'. Check network or SSH keys." -ForegroundColor Red
+            Write-Host "Failed to clone '$Name'. Check network, URL, or SSH keys." -ForegroundColor Red
         }
     }
 
@@ -172,18 +184,19 @@ switch ($Command) {
                 try {
                     if ($pkg.Frozen) {
                         $statusMsg = "Frozen$skipMsg"
-                    }
-                    else {
-                        $localHash = & git rev-parse HEAD
-                        $remoteOutput = & git ls-remote $pkg.Url "refs/heads/$($pkg.Branch)"
-                        if ($remoteOutput) {
-                            $remoteHash = ($remoteOutput -split '\s+')[0]
-                            if ($localHash -and $remoteHash -and ($localHash -ne $remoteHash)) {
-                                $isBehind = $true
-                                $statusMsg = "Update available$skipMsg"
+                    } else {
+                        if ((Run-GitSilent @("rev-parse", "HEAD")) -eq 0) {
+                            $localHash = & git rev-parse HEAD 2>$null
+                            $remoteOutput = & git ls-remote $pkg.Url "refs/heads/$($pkg.Branch)" 2>$null
+                            if ($remoteOutput) {
+                                $remoteHash = ($remoteOutput -split '\s+')[0]
+                                if ($localHash -and $remoteHash -and ($localHash -ne $remoteHash)) {
+                                    $isBehind = $true
+                                    $statusMsg = "Update available$skipMsg"
+                                }
                             }
+                            else { $statusMsg = "Error reaching remote$skipMsg" }
                         }
-                        else { $statusMsg = "Error reaching remote$skipMsg" }
                     }
                 }
                 catch { $statusMsg = "Error checking status$skipMsg" }
@@ -241,29 +254,41 @@ switch ($Command) {
             if (Test-Path $pkg.Path) {
                 Write-Host "== > Pulling $($pkg.Id)... " -ForegroundColor Cyan
                 Push-Location $pkg.Path
-                $hashBefore = & git rev-parse HEAD
+                $hashBefore = & git rev-parse HEAD 2>$null
+                $pullFailed = $false
 
-                if ($pkg.Depth -eq 1) { 
-                    & git fetch origin $pkg.Branch --depth 1 
+                if ($LASTEXITCODE -eq 0) {
+                    if ($pkg.Depth -eq 1) { 
+                        & git fetch --progress origin $pkg.Branch --depth 1 1>$null
+                    } else {
+                        if ((& git rev-parse --is-shallow-repository 2>$null) -eq 'true') {
+                            & git fetch --progress --unshallow 1>$null
+                        }
+                        & git fetch --progress origin $pkg.Branch 1>$null
+                    }
+                    & git reset --hard origin/$($pkg.Branch) 1>$null
+                }
+                else { $pullFailed = $true }
+
+                if ($pullFailed -or $LASTEXITCODE -ne 0) {
+                    Write-Host "    -> Pull failed for $($pkg.Id)." -ForegroundColor Red
                 }
                 else {
-                    if ((& git rev-parse --is-shallow-repository 2>$null) -eq 'true') { 
-                        & git fetch --unshallow 
+                    $hashAfter = & git rev-parse HEAD 2>$null
+                    if ($hashBefore -and $hashAfter -and ($hashBefore -ne $hashAfter)) { 
+                        Write-Host "    -> Updated!" -ForegroundColor Green 
                     }
-                    & git fetch origin $pkg.Branch
+                    else { Write-Host "    -> Already up to date." -ForegroundColor DarkGray }
                 }
-                & git reset --hard origin/$($pkg.Branch)
-
-                $hashAfter = & git rev-parse HEAD
-                if ($hashBefore -and $hashAfter -and ($hashBefore -ne $hashAfter)) { Write-Host "    -> Updated!" -ForegroundColor Green }
-                else { Write-Host "    -> Already up to date." -ForegroundColor DarkGray }
                 Pop-Location
             }
             else {
                 Write-Host "== > Restoring missing repository $($pkg.Id)... " -ForegroundColor Magenta
-                $gitArgs = if ($pkg.Depth -eq 1) { @("clone", "--depth", "1", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch) }
-                else { @("clone", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch) }
-                & git @gitArgs
+                $gitArgs = if ($pkg.Depth -eq 1) { @("clone", "--progress", "--depth", "1", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch) }
+                           else { @("clone", "--progress", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch) }
+                & git @gitArgs 1>$null
+                if ($LASTEXITCODE -ne 0) { Write-Host "    -> Restore failed." -ForegroundColor Red }
+                else { Write-Host "    -> Restored successfully." -ForegroundColor Green }
             }
         }
         if ($Target -eq "all") { Write-Host "All repositories processed." -ForegroundColor Green }
@@ -308,7 +333,7 @@ switch ($Command) {
         foreach ($pkg in $importedData) {
             if (-not $existingIds -or $existingIds -notcontains $pkg.Id) {
                 if ($null -eq $pkg.Frozen) { $pkg | Add-Member -NotePropertyName Frozen -NotePropertyValue $false -Force }
-                if ($null -eq $pkg.Depth) { $pkg | Add-Member -NotePropertyName Depth   -NotePropertyValue 1 -Force }
+                if ($null -eq $pkg.Depth)   { $pkg | Add-Member -NotePropertyName Depth   -NotePropertyValue 1 -Force }
                 $currentPackages += $pkg; $addedCount++
             }
         }
