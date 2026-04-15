@@ -13,6 +13,11 @@ Commands:
   import  <path>           Clone all repos from an export file
   help
 
+Flags:
+  -Quiet                        Suppress informational output
+  -StatusCheckThrottle <1..32>  Max parallel workers for "pull" status checks (default 6)
+  -NoParallelStatus             Force sequential status checks for "pull" with no target
+
 Specs accepted:
   host:namespace/repo                     => https://host/namespace/repo.git
   https://host/namespace/.../repo(.git)
@@ -253,6 +258,12 @@ Commands:
   import  <path>           Install all packages from an export file
   Help                     Show this help
 
+Flags:
+  -Quiet                        Suppress informational output messages
+  -StatusCheckThrottle <1..32>  Max parallel workers for "pull" status checks (default 6)
+                                Applies when running "pull" with no target
+  -NoParallelStatus             Disable parallel status checks for "pull" with no target
+
 Specs:
   host:namespace/repo
   https://host/namespace/.../repo(.git)
@@ -267,6 +278,9 @@ Examples:
   .\gitpkg.ps1 pull
   .\gitpkg.ps1 pull all
   .\gitpkg.ps1 pull github.com:BurntSushi/ripgrep
+  .\gitpkg.ps1 Pull -Quiet
+  .\gitpkg.ps1 Pull -StatusCheckThrottle 12
+  .\gitpkg.ps1 Pull -NoParallelStatus
   .\gitpkg.ps1 rm    github.com:BurntSushi/ripgrep
   .\gitpkg.ps1 list
   .\gitpkg.ps1 export .\gitpkg.json

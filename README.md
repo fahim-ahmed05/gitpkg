@@ -111,9 +111,9 @@ Path rules:
 | Flag | What it does |
 |---|---|
 | `-KeepFiles` | Used with `Rm` — skips deleting the directory |
-| `-Quiet` | Suppresses informational output |
-| `-StatusCheckThrottle` | Max parallel workers for `Pull` status checks (default `6`) |
-| `-NoParallelStatus` | Force sequential status checks for `Pull` |
+| `-Quiet` | Suppresses informational output messages (warnings/errors still show) |
+| `-StatusCheckThrottle` | Max parallel workers for `Pull` status checks with no target (default `6`, range `1..32`) |
+| `-NoParallelStatus` | Forces sequential status checks for `Pull` with no target |
 
 ## Support
 
