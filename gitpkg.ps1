@@ -48,17 +48,22 @@ function Get-ShortHash {
     return $hex.Substring(0, 8).ToLower()
 }
 
-function Run-GitSilent {
+# Runs git silently. Captures & prints output ONLY if the command fails.
+function Run-GitQuiet {
     param([string[]]$ArgsList)
-    $null = & git @ArgsList 2>&1
-    return $LASTEXITCODE
+    $result = & git @ArgsList 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "`n[Git Error] Failed: git $($ArgsList -join ' ')" -ForegroundColor Red
+        $result | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    }
+    return $result
 }
 
 function Get-RemoteDefaultBranch {
     param([string]$Url)
     try {
-        if ((Run-GitSilent @("ls-remote", "--symref", $Url, "HEAD")) -eq 0) {
-            $output = & git ls-remote --symref $Url HEAD 2>&1
+        $output = Run-GitQuiet @("ls-remote", "--symref", $Url, "HEAD")
+        if ($LASTEXITCODE -eq 0) {
             $outputString = $output -join "`n"
             if ($outputString -match 'ref: refs/heads/([^\s]+)\s+HEAD') { return $matches[1] }
         }
@@ -133,9 +138,9 @@ switch ($Command) {
             exit 1
         }
 
-        $gitArgs = @("clone", "--progress", "--depth", "1", $CleanTarget, $TargetPath, "--branch", $Branch)
+        $gitArgs = @("clone", "--depth", "1", $CleanTarget, $TargetPath, "--branch", $Branch)
         Write-Host "== > Cloning $FormattedId... " -ForegroundColor Cyan
-        & git @gitArgs 1>$null
+        Run-GitQuiet $gitArgs | Out-Null
 
         if ($LASTEXITCODE -eq 0) {
             $newPkg = [PSCustomObject]@{
@@ -153,7 +158,7 @@ switch ($Command) {
             Write-Host "Successfully cloned to '$DirName'." -ForegroundColor Green
         }
         else {
-            Write-Host "Failed to clone '$Name'. Check network, URL, or SSH keys." -ForegroundColor Red
+            Write-Host "Failed to clone '$Name'. Check network or SSH keys." -ForegroundColor Red
         }
     }
 
@@ -184,11 +189,13 @@ switch ($Command) {
                 try {
                     if ($pkg.Frozen) {
                         $statusMsg = "Frozen$skipMsg"
-                    } else {
-                        if ((Run-GitSilent @("rev-parse", "HEAD")) -eq 0) {
-                            $localHash = & git rev-parse HEAD 2>$null
-                            $remoteOutput = & git ls-remote $pkg.Url "refs/heads/$($pkg.Branch)" 2>$null
-                            if ($remoteOutput) {
+                    }
+                    else {
+                        $localHash = Run-GitQuiet @("rev-parse", "HEAD")
+                        if ($LASTEXITCODE -ne 0) { $statusMsg = "Git error checking status$skipMsg" }
+                        else {
+                            $remoteOutput = Run-GitQuiet @("ls-remote", $pkg.Url, "refs/heads/$($pkg.Branch)")
+                            if ($LASTEXITCODE -eq 0 -and $remoteOutput) {
                                 $remoteHash = ($remoteOutput -split '\s+')[0]
                                 if ($localHash -and $remoteHash -and ($localHash -ne $remoteHash)) {
                                     $isBehind = $true
@@ -254,19 +261,22 @@ switch ($Command) {
             if (Test-Path $pkg.Path) {
                 Write-Host "== > Pulling $($pkg.Id)... " -ForegroundColor Cyan
                 Push-Location $pkg.Path
-                $hashBefore = & git rev-parse HEAD 2>$null
+                $hashBefore = Run-GitQuiet @("rev-parse", "HEAD")
                 $pullFailed = $false
 
                 if ($LASTEXITCODE -eq 0) {
                     if ($pkg.Depth -eq 1) { 
-                        & git fetch --progress origin $pkg.Branch --depth 1 1>$null
-                    } else {
-                        if ((& git rev-parse --is-shallow-repository 2>$null) -eq 'true') {
-                            & git fetch --progress --unshallow 1>$null
-                        }
-                        & git fetch --progress origin $pkg.Branch 1>$null
+                        Run-GitQuiet @("fetch", "origin", $pkg.Branch, "--depth", "1") | Out-Null
                     }
-                    & git reset --hard origin/$($pkg.Branch) 1>$null
+                    else {
+                        # Only unshallow if actually shallow
+                        $isShallow = Run-GitQuiet @("rev-parse", "--is-shallow-repository")
+                        if ($LASTEXITCODE -eq 0 -and $isShallow -eq 'true') {
+                            Run-GitQuiet @("fetch", "--unshallow") | Out-Null
+                        }
+                        Run-GitQuiet @("fetch", "origin", $pkg.Branch) | Out-Null
+                    }
+                    Run-GitQuiet @("reset", "--hard", "origin/$($pkg.Branch)") | Out-Null
                 }
                 else { $pullFailed = $true }
 
@@ -274,8 +284,8 @@ switch ($Command) {
                     Write-Host "    -> Pull failed for $($pkg.Id)." -ForegroundColor Red
                 }
                 else {
-                    $hashAfter = & git rev-parse HEAD 2>$null
-                    if ($hashBefore -and $hashAfter -and ($hashBefore -ne $hashAfter)) { 
+                    $hashAfter = Run-GitQuiet @("rev-parse", "HEAD")
+                    if ($LASTEXITCODE -eq 0 -and $hashBefore -and $hashAfter -and ($hashBefore -ne $hashAfter)) { 
                         Write-Host "    -> Updated!" -ForegroundColor Green 
                     }
                     else { Write-Host "    -> Already up to date." -ForegroundColor DarkGray }
@@ -284,9 +294,9 @@ switch ($Command) {
             }
             else {
                 Write-Host "== > Restoring missing repository $($pkg.Id)... " -ForegroundColor Magenta
-                $gitArgs = if ($pkg.Depth -eq 1) { @("clone", "--progress", "--depth", "1", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch) }
-                           else { @("clone", "--progress", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch) }
-                & git @gitArgs 1>$null
+                $gitArgs = if ($pkg.Depth -eq 1) { @("clone", "--depth", "1", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch) }
+                else { @("clone", $pkg.Url, $pkg.Path, "--branch", $pkg.Branch) }
+                Run-GitQuiet $gitArgs | Out-Null
                 if ($LASTEXITCODE -ne 0) { Write-Host "    -> Restore failed." -ForegroundColor Red }
                 else { Write-Host "    -> Restored successfully." -ForegroundColor Green }
             }
@@ -333,7 +343,7 @@ switch ($Command) {
         foreach ($pkg in $importedData) {
             if (-not $existingIds -or $existingIds -notcontains $pkg.Id) {
                 if ($null -eq $pkg.Frozen) { $pkg | Add-Member -NotePropertyName Frozen -NotePropertyValue $false -Force }
-                if ($null -eq $pkg.Depth)   { $pkg | Add-Member -NotePropertyName Depth   -NotePropertyValue 1 -Force }
+                if ($null -eq $pkg.Depth) { $pkg | Add-Member -NotePropertyName Depth   -NotePropertyValue 1 -Force }
                 $currentPackages += $pkg; $addedCount++
             }
         }
