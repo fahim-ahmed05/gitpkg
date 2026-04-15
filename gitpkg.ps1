@@ -117,7 +117,7 @@ function Get-DirName([string]$Id) {
 
 function Format-PathPart([string]$p) {
   $t = $p.Trim().TrimStart('/').TrimEnd('/')
-  if ($t.EndsWith('.git')) { $t = $t.Substring(0, $t.Length - 4) }
+  if ($t.EndsWith('.git', [System.StringComparison]::OrdinalIgnoreCase)) { $t = $t.Substring(0, $t.Length - 4) }
   $t
 }
 
@@ -139,7 +139,7 @@ function ConvertTo-PackageSpec([string]$Spec) {
     try {
       $u = [Uri]$s; $rh = $u.Host; $path = Format-PathPart $u.AbsolutePath
       if ($path -notmatch '^[^/]+/[^/]+$') { throw "URL path must be owner/repo (got '$path')." }
-      $url = if (-not $s.EndsWith('.git')) { "https://$rh/$path.git" } else { $s }
+      $url = if (-not $s.EndsWith('.git', [System.StringComparison]::OrdinalIgnoreCase)) { "https://$rh/$path.git" } else { $s }
       return [PSCustomObject]@{ Id="${rh}:$path"; Url=$url; Host=$rh; Path=$path; Display=$path }
     } catch [System.UriFormatException] { throw "Malformed URL: $s" }
   }
@@ -165,7 +165,11 @@ function Import-Manifest {
   if (-not (Test-Path -LiteralPath $path)) { return New-EmptyManifest }
   $raw = Get-Content -LiteralPath $path -Raw
   if ([string]::IsNullOrWhiteSpace($raw)) { return New-EmptyManifest }
-  $obj = $raw | ConvertFrom-Json -Depth 64
+  try {
+    $obj = $raw | ConvertFrom-Json -Depth 64
+  } catch {
+    throw "Invalid manifest JSON at '$path'. Fix the file or remove it to regenerate. $($_.Exception.Message)"
+  }
   if (-not $obj.PSObject.Properties['packages'])  { $obj | Add-Member -NotePropertyName packages  -NotePropertyValue ([PSCustomObject]@{}) -Force }
   if (-not $obj.PSObject.Properties['version'])   { $obj | Add-Member -NotePropertyName version   -NotePropertyValue 1 -Force }
   if (-not $obj.PSObject.Properties['createdAt']) { $obj | Add-Member -NotePropertyName createdAt -NotePropertyValue (Get-Date -Format 'o') -Force }
@@ -281,7 +285,9 @@ function Add-GitpkgPackage([string]$Spec, [object]$Manifest = $null, [switch]$Sk
 function Update-OnePackage([string]$Id) {
   $m = Import-Manifest; $p = Get-PackageEntry $m $Id
   if (-not $p) { throw "Package not found in manifest: $Id" }
-  $dir = Get-PackageDir -RepoRoot (Get-RepoRoot) -DirName $p.dir
+  $repoRoot = Get-RepoRoot
+  Ensure-Dir $repoRoot
+  $dir = Get-PackageDir -RepoRoot $repoRoot -DirName $p.dir
 
   if (-not (Test-Path -LiteralPath $dir)) {
     Write-Warn "Directory missing for '$Id'; re-cloning."
@@ -298,13 +304,13 @@ function Update-OnePackage([string]$Id) {
 
 function Get-PackageUpdateStatus([string]$Id, [object]$Manifest, [string]$RepoRoot) {
   $p = Get-PackageEntry $Manifest $Id
-  if (-not $p) { return [PSCustomObject]@{ Package=$Id; Status='not in manifest'; Behind='' } }
+  if (-not $p) { return [PSCustomObject]@{ Package=$Id; Status='not in manifest'; Behind=''; Reason='' } }
 
   $display = if ($p.display) { $p.display } else { $Id }
   $dir     = Get-PackageDir -RepoRoot $RepoRoot -DirName $p.dir
 
   if (-not (Test-Path -LiteralPath $dir) -or -not (Test-GitRepo -Dir $dir)) {
-    return [PSCustomObject]@{ Package=$display; Status='missing'; Behind='' }
+    return [PSCustomObject]@{ Package=$display; Status='missing'; Behind=''; Reason='' }
   }
   try {
     Invoke-Git -GitArgs @('fetch', '--quiet') -WorkingDir $dir | Out-Null
@@ -314,8 +320,20 @@ function Get-PackageUpdateStatus([string]$Id, [object]$Manifest, [string]$RepoRo
       Package = $display
       Status  = if ($available) { 'update available' } else { 'up-to-date' }
       Behind  = if ($available) { "$behind commit$(if ($behind -ne '1') {'s'})" } else { '' }
+      Reason  = ''
     }
-  } catch { [PSCustomObject]@{ Package=$display; Status='error'; Behind='' } }
+  } catch {
+    $msg = $_.Exception.Message
+    $reason = if ($msg -match 'HEAD\.\.@\{u\}|no upstream configured|no upstream branch') {
+      'no upstream branch configured'
+    } elseif ($msg -match 'Authentication failed|Permission denied|Could not read from remote repository') {
+      'authentication/permission failure'
+    } else {
+      ($msg -split "`r?`n")[0]
+    }
+
+    [PSCustomObject]@{ Package=$display; Status='error'; Behind=''; Reason=$reason }
+  }
 }
 
 function Update-GitpkgPackage([string]$Target) {
@@ -384,7 +402,11 @@ function Export-GitpkgPackage([string]$OutPath) {
 function Import-GitpkgPackage([string]$InPath) {
   if ([string]::IsNullOrWhiteSpace($InPath)) { throw 'Import requires a path to an export JSON file.' }
   if (-not (Test-Path -LiteralPath $InPath)) { throw "File not found: $InPath" }
-  $obj = Get-Content -LiteralPath $InPath -Raw | ConvertFrom-Json -Depth 64
+  try {
+    $obj = Get-Content -LiteralPath $InPath -Raw | ConvertFrom-Json -Depth 64
+  } catch {
+    throw "Invalid import JSON at '$InPath'. Ensure the export file is valid JSON. $($_.Exception.Message)"
+  }
   if (-not $obj.PSObject.Properties['packages']) { throw "Invalid export file: missing 'packages' field." }
 
   $m = Import-Manifest
