@@ -24,7 +24,7 @@ Set-Alias gitpkg C:\path\to\your\scripts\gitpkg.ps1
 Add this snippet to your `$PROFILE` so you can hit Tab to autocomplete your installed repository names when pulling or removing:
 
 ```powershell
-Register-ArgumentCompleter -CommandName gitpkg -ParameterName Target -ScriptBlock {
+Register-ArgumentCompleter -CommandName gitpkg -ParameterName Targets -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
     $ConfigFile = Join-Path $env:USERPROFILE ".config\gitpkg\repos.json"
     if (Test-Path $ConfigFile) {
@@ -46,9 +46,12 @@ Just pass the URL. It will figure out the default branch automatically.
 gitpkg clone https://github.com/somedev/uosc
 ```
 
-If you want a specific branch, pass it as the second argument:
-```powershell
 gitpkg clone git@github.com:somedev/uosc.git dev
+
+### Install multiple repositories
+Just pass multiple URLs.
+```powershell
+gitpkg clone https://github.com/dev1/repo1 https://github.com/dev2/repo2
 ```
 
 ### Update your packages
@@ -64,6 +67,9 @@ gitpkg pull all
 
 # Update just one specific package
 gitpkg pull uosc
+
+# Update multiple specific packages
+gitpkg pull uosc thumbfast ModernZ
 ```
 
 ### See what is installed
@@ -76,6 +82,11 @@ gitpkg list
 You can remove by name, exact ID, or hash. If multiple packages share the same name, gitpkg will prompt you with a numbered list so you don't delete the wrong one.
 ```powershell
 gitpkg rm uosc
+
+### Remove multiple packages
+```powershell
+gitpkg rm pkg1 pkg2 pkg3
+```
 ```
 
 ### Freeze & Unfreeze Packages
@@ -85,8 +96,11 @@ Prevent specific repositories from being updated during `gitpkg pull`. Frozen pa
 # Freeze a package
 gitpkg freeze uosc
 
-# Unfreeze it later
-gitpkg unfreeze uosc
+# Freeze multiple packages
+gitpkg freeze pkg1 pkg2
+
+# Unfreeze them later
+gitpkg unfreeze uosc pkg1
 ```
 
 ### Git History
@@ -94,10 +108,10 @@ By default, gitpkg clones and pulls using --depth 1 (shallow). If you need full 
 
 ```powershell
 # Fetch full git history on next pull
-gitpkg deep uosc
+gitpkg deep uosc pkg1
 
 # Revert back to shallow cloning
-gitpkg shallow uosc
+gitpkg shallow uosc pkg1
 ```
 
 ### Sync across machines
